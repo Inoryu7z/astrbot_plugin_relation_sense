@@ -1,0 +1,76 @@
+{
+  "enable_injection": {
+    "description": "注入情感上下文",
+    "type": "bool",
+    "default": true,
+    "hint": "是否在每次 LLM 请求时自动注入 Bot 此刻的情感上下文。"
+  },
+  "analysis_provider_id": {
+    "description": "分析模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于关系分析的 LLM 提供商。必须配置，否则无法执行分析。"
+  },
+  "analysis_secondary_provider_id": {
+    "description": "备用分析模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "主模型失败时自动尝试。可留空。"
+  },
+  "analysis_timeout_seconds": {
+    "description": "分析超时（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "单次 LLM 调用的最大等待时间。"
+  },
+  "analysis_interval_minutes": {
+    "description": "分析间隔（分钟）",
+    "type": "int",
+    "default": 30,
+    "hint": "两次分析之间的最小时间间隔。"
+  },
+  "min_new_messages": {
+    "description": "最少消息数",
+    "type": "int",
+    "default": 15,
+    "hint": "新增消息数达到此值才可能触发分析。"
+  },
+  "enable_event_trigger": {
+    "description": "事件触发",
+    "type": "bool",
+    "default": true,
+    "hint": "检测到冲突/分享秘密/回归等关键事件时立即触发分析。"
+  },
+  "affection_freeze_threshold": {
+    "description": "好感度冻结线",
+    "type": "int",
+    "default": 90,
+    "hint": "Bot 好感度达到此值后冻结，不再变化。可通过命令解冻。"
+  },
+  "trust_freeze_threshold": {
+    "description": "信任度冻结线",
+    "type": "int",
+    "default": 88,
+    "hint": "Bot 信任度达到此值后冻结，不再变化。可通过命令解冻。"
+  },
+  "history_retention_days": {
+    "description": "记录保留（天）",
+    "type": "int",
+    "default": 60,
+    "hint": "分析记录保留天数，超过自动清理。"
+  },
+  "buffer_max_size": {
+    "description": "消息缓存上限",
+    "type": "int",
+    "default": 100,
+    "hint": "每个会话在内存中缓存的最大消息条数。"
+  },
+  "debug_mode": {
+    "description": "调试模式",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后注入的提示词内容会输出到日志，排查问题时再开。"
+  }
+}
