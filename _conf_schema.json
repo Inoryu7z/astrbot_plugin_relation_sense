@@ -3,7 +3,7 @@
     "description": "注入情感上下文",
     "type": "bool",
     "default": true,
-    "hint": "是否在每次 LLM 请求时自动注入 Bot 此刻的情感上下文。"
+    "hint": "是否在每次 LLM 请求时自动注入你此刻的情感上下文。"
   },
   "analysis_provider_id": {
     "description": "分析模型",
@@ -47,13 +47,13 @@
     "description": "好感度冻结线",
     "type": "int",
     "default": 90,
-    "hint": "Bot 好感度达到此值后冻结，不再变化。可通过命令解冻。"
+    "hint": "好感度达到此值后冻结，不再变化。可通过命令解冻。"
   },
   "trust_freeze_threshold": {
     "description": "信任度冻结线",
     "type": "int",
     "default": 88,
-    "hint": "Bot 信任度达到此值后冻结，不再变化。可通过命令解冻。"
+    "hint": "信任度达到此值后冻结，不再变化。可通过命令解冻。"
   },
   "history_retention_days": {
     "description": "记录保留（天）",

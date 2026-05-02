@@ -24,8 +24,8 @@ from .statics.defaults import COOLING_DEPENDENCE_DECAY, COOLING_DEPTH_DECAY, COO
 @register(
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
-    "关系感知插件，让 Bot 感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.1.1",
+    "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
+    "1.2.0",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -168,7 +168,7 @@ class RelationSensePlugin(Star):
 
                 dialogue_lines = []
                 for msg in messages:
-                    role_label = "用户" if msg["role"] == "user" else "Bot"
+                    role_label = "用户" if msg["role"] == "user" else "你"
                     dialogue_lines.append(f"{role_label}: {msg['content']}")
                 dialogue_text = "\n".join(dialogue_lines)
 
@@ -344,14 +344,14 @@ class RelationSensePlugin(Star):
     # ========== 管理命令 ==========
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("relation_status")
+    @filter.command("关系状态", alias={"relation_status"})
     async def cmd_relation_status(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
         result = await self.admin.get_status(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("relation_history")
+    @filter.command("关系历史", alias={"relation_history"})
     async def cmd_relation_history(self, event: AstrMessageEvent, limit: str = "5"):
         try:
             n = int(limit)
@@ -362,25 +362,25 @@ class RelationSensePlugin(Star):
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("relation_unfreeze")
+    @filter.command("解冻关系", alias={"relation_unfreeze"})
     async def cmd_relation_unfreeze(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
         result = await self.admin.unfreeze_all(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("relation_reset")
+    @filter.command("重置关系", alias={"relation_reset"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
         result = await self.admin.reset(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("relation_analyze")
+    @filter.command("关系分析", alias={"relation_analyze"})
     async def cmd_relation_analyze(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
         self._spawn_bg(self._do_analyze(session_id, trigger="manual"))
-        yield event.plain_result("已触发手动分析，结果将在后台生成，稍后可用 relation_status 查看。")
+        yield event.plain_result("已触发手动分析，结果将在后台生成，稍后可用「关系状态」查看。")
 
     # ========== 场景判定 ==========
 
