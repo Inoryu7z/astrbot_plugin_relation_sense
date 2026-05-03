@@ -116,23 +116,9 @@ class RelationAdminCommands:
             f"信任度: {state['trust']:.1f} → {trust:.1f}"
         )
 
-    async def reset(self, session_id: str, platform_id: str = "", user_id: str = "") -> str:
-        """重置关系数据，回到初始值并触发回溯分析。"""
+    async def reset(self, session_id: str) -> str:
+        """重置关系数据。"""
         db = self.plugin.db
         await db.reset_relation_state(session_id)
-
         logger.info("[RelationSense] 已重置关系数据 session=%s", session_id)
-
-        # 触发回溯初始化
-        try:
-            from ..core.initializer import RelationInitializer
-            initializer = RelationInitializer(self.plugin.context, db, self.plugin)
-            await initializer.initialize_session(
-                session_id=session_id,
-                platform_id=platform_id,
-                user_id=user_id,
-            )
-        except Exception as e:
-            logger.warning("[RelationSense] 重置后回溯初始化失败: %s", e)
-
-        return f"已重置 {session_id} 的关系数据并触发回溯分析。"
+        return f"已重置 {session_id} 的关系数据。"

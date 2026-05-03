@@ -386,7 +386,7 @@ class RelationSensePlugin(Star):
     @filter.command("重置关系", alias={"relation_reset"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
-        result = await self.admin.reset(session_id, event.get_platform_id(), event.get_sender_id())
+        result = await self.admin.reset(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
