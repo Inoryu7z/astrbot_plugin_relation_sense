@@ -146,23 +146,22 @@ class RelationSensePlugin(Star):
 
     # ========== 核心分析流程 ==========
 
-    async def _do_analyze(self, session_id: str, trigger: str = "scheduled"):
-        """执行一次异步分析。"""
+    async def _do_analyze(self, session_id: str, trigger: str = "scheduled") -> dict:
+        """执行一次异步分析，返回结构化结果。"""
         lock = self._get_lock(session_id)
         if lock.locked():
             logger.debug("[RelationSense] 分析已在执行 session=%s，跳过", session_id)
-            return
+            return {"ok": False, "error": "分析已在执行中，请稍后再试"}
 
         async with lock:
             try:
                 if not self._cfg("enable_plugin", True):
-                    return
+                    return {"ok": False, "error": "插件未启用"}
 
-                # 获取对话文本
                 messages = self.buffer.get_recent(session_id, 80)
                 if not messages:
                     logger.debug("[RelationSense] 无缓存消息 session=%s，跳过分析", session_id)
-                    return
+                    return {"ok": False, "error": "暂无缓存消息，请先进行几轮对话后再分析"}
 
                 dialogue_lines = []
                 for msg in messages:
@@ -217,7 +216,7 @@ class RelationSensePlugin(Star):
 
                 if not result:
                     logger.warning("[RelationSense] 分析失败 session=%s", session_id)
-                    return
+                    return {"ok": False, "error": "LLM 分析调用失败，请检查分析模型配置"}
 
                 # 应用分析结果
                 new_values, has_changes = self.tracker.apply_analysis_result(
@@ -293,11 +292,31 @@ class RelationSensePlugin(Star):
                         level,
                     )
 
+                level_label = self.tracker.compute_label(level)
+                return {
+                    "ok": True,
+                    "level": level,
+                    "level_label": level_label,
+                    "summary": summary,
+                    "user_state": user_state,
+                    "tone_hint": tone_hint,
+                    "changes": {
+                        "affection": (current_values["affection"], new_values["affection"]),
+                        "trust": (current_values["trust"], new_values["trust"]),
+                        "depth": (current_values["depth"], new_values["depth"]),
+                        "dependence": (current_values["dependence"], new_values["dependence"]),
+                        "return_rate": (current_values["return_rate"], new_values["return_rate"]),
+                    },
+                    "is_initial": is_initial,
+                    "has_changes": has_changes,
+                }
+
             except Exception as e:
                 logger.error(
                     "[RelationSense] 分析异常 session=%s: %s",
                     session_id, e, exc_info=True,
                 )
+                return {"ok": False, "error": f"分析异常: {e}"}
 
     # ========== system_prompt 注入 ==========
 
@@ -378,8 +397,28 @@ class RelationSensePlugin(Star):
     @filter.command("关系分析", alias={"relation_analyze"})
     async def cmd_relation_analyze(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
-        self._spawn_bg(self._do_analyze(session_id, trigger="manual"))
-        yield event.plain_result("已触发手动分析，结果将在后台生成，稍后可用「关系状态」查看。")
+        yield event.plain_result("正在分析当前会话的关系状态，请稍候…")
+        outcome = await self._do_analyze(session_id, trigger="manual")
+        if not outcome["ok"]:
+            yield event.plain_result(f"关系分析失败：{outcome['error']}")
+            return
+        lines = [
+            f"📊 关系分析完成",
+            f"等级：{outcome['level']}「{outcome['level_label']}」",
+        ]
+        if outcome["is_initial"]:
+            lines.append("（首次印象评估）")
+        if outcome["summary"]:
+            lines.append(f"总结：{outcome['summary']}")
+        if outcome["user_state"]:
+            lines.append(f"对方状态：{outcome['user_state']}")
+        changes = outcome["changes"]
+        dim_labels = {"affection": "好感度", "trust": "信任度", "depth": "对话深度", "dependence": "依赖度", "return_rate": "回归率"}
+        for dim, label in dim_labels.items():
+            before, after = changes[dim]
+            arrow = "↑" if after > before else ("↓" if after < before else "→")
+            lines.append(f"{label}：{before:.0f} {arrow} {after:.0f}")
+        yield event.plain_result("\n".join(lines))
 
     # ========== 场景判定 ==========
 
