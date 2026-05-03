@@ -39,20 +39,39 @@ class RelationInitializer:
         Returns:
             True 表示回溯成功，False 表示冷启动
         """
+        from ..core.tracker import DimensionTracker
+        tracker = DimensionTracker(self.plugin)
+        cold_affection, cold_trust, cold_depth = 60.0, 50.0, 35.0
+        cold_dependence, cold_return_rate = 10.0, 5.0
+        cold_level = tracker.compute_level(cold_affection, cold_trust, cold_depth)
+
         dialogue_text = await self._fetch_history(platform_id, user_id)
         if not dialogue_text:
             logger.info(
-                "[RelationSense] 未获取到历史消息 session=%s，使用冷启动默认值",
-                session_id,
+                "[RelationSense] 未获取到历史消息 session=%s，使用冷启动默认值（等级=%s）",
+                session_id, cold_level,
             )
-            await self.db.upsert_relation_state(session_id=session_id)
+            await self.db.upsert_relation_state(
+                session_id=session_id,
+                affection=cold_affection,
+                trust=cold_trust,
+                depth=cold_depth,
+                dependence=cold_dependence,
+                return_rate=cold_return_rate,
+                relation_level=cold_level,
+                summary="",
+            )
             await self.db.add_analysis_log(
                 session_id=session_id,
                 raw_json=json.dumps({}),
                 old_values="{}",
-                new_values=json.dumps(
-                    {"affection": 50, "trust": 30, "depth": 20, "dependence": 10, "return_rate": 0}
-                ),
+                new_values=json.dumps({
+                    "affection": cold_affection,
+                    "trust": cold_trust,
+                    "depth": cold_depth,
+                    "dependence": cold_dependence,
+                    "return_rate": cold_return_rate,
+                }),
                 summary="冷启动初始化",
                 trigger="backfill",
                 source="cold_start",
@@ -71,15 +90,28 @@ class RelationInitializer:
         )
 
         if not result:
-            logger.warning("[RelationSense] 回溯分析失败 session=%s，使用默认值", session_id)
-            await self.db.upsert_relation_state(session_id=session_id)
+            logger.warning("[RelationSense] 回溯分析失败 session=%s，使用默认值（等级=%s）", session_id, cold_level)
+            await self.db.upsert_relation_state(
+                session_id=session_id,
+                affection=cold_affection,
+                trust=cold_trust,
+                depth=cold_depth,
+                dependence=cold_dependence,
+                return_rate=cold_return_rate,
+                relation_level=cold_level,
+                summary="",
+            )
             await self.db.add_analysis_log(
                 session_id=session_id,
                 raw_json=json.dumps({}),
                 old_values="{}",
-                new_values=json.dumps(
-                    {"affection": 50, "trust": 30, "depth": 20, "dependence": 10, "return_rate": 0}
-                ),
+                new_values=json.dumps({
+                    "affection": cold_affection,
+                    "trust": cold_trust,
+                    "depth": cold_depth,
+                    "dependence": cold_dependence,
+                    "return_rate": cold_return_rate,
+                }),
                 summary="回溯分析失败，回退冷启动",
                 trigger="backfill",
                 source="cold_start",

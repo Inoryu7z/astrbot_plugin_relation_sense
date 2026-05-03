@@ -25,7 +25,7 @@ from .statics.defaults import COOLING_DEPENDENCE_DECAY, COOLING_DEPTH_DECAY, COO
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.2.0",
+    "1.2.1",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -93,11 +93,27 @@ class RelationSensePlugin(Star):
         try:
             session_id = event.unified_msg_origin
             message_str = getattr(event, "message_str", "") or ""
-            # 缓存当前人格到插件实例
             if getattr(req, "system_prompt", ""):
                 self._last_persona = req.system_prompt
-            # 记录最近活跃时间
             self._last_activity[session_id] = time.time()
+
+            if session_id not in self._initialized_sessions:
+                self._initialized_sessions.add(session_id)
+                existing_state = await self.db.get_relation_state_safe(session_id)
+                if existing_state is None:
+                    platform_id = event.get_platform_id()
+                    user_id = event.get_sender_id()
+                    logger.info(
+                        "[RelationSense] 新会话触发回溯初始化 session=%s platform=%s user=%s",
+                        session_id, platform_id, user_id,
+                    )
+                    self._spawn_bg(self.initializer.initialize_session(
+                        session_id=session_id,
+                        platform_id=platform_id,
+                        user_id=user_id,
+                        persona_prompt=self._last_persona,
+                    ))
+
             if message_str and message_str.strip():
                 self.buffer.add_message(session_id, "user", message_str)
                 await self.db.increment_msg_count(session_id)
@@ -175,26 +191,24 @@ class RelationSensePlugin(Star):
                 # 获取当前状态
                 state = await self.db.get_relation_state_safe(session_id)
                 if state is None:
-                    # 还没有数据 → 冷启动（或触发回溯初始化）
-                    state = {
-                        "affection": 50.0,
-                        "trust": 30.0,
-                        "depth": 20.0,
-                        "dependence": 10.0,
-                        "return_rate": 0.0,
-                        "relation_level": "Lv1",
-                        "summary": "",
-                    }
-                    await self.db.upsert_relation_state(
-                        session_id=session_id,
-                        affection=50.0,
-                        trust=30.0,
-                        depth=20.0,
-                        dependence=10.0,
-                        return_rate=0.0,
-                        relation_level="Lv1",
-                        summary="",
+                    if session_id not in self._initialized_sessions:
+                        logger.info(
+                            "[RelationSense] 会话 %s 尚未初始化，跳过本次分析，将触发回溯初始化",
+                            session_id,
+                        )
+                        self._initialized_sessions.add(session_id)
+                        self._spawn_bg(self.initializer.initialize_session(
+                            session_id=session_id,
+                            platform_id="",
+                            user_id="",
+                            persona_prompt=self._last_persona,
+                        ))
+                        return
+                    logger.info(
+                        "[RelationSense] 会话 %s 回溯初始化未完成，跳过本次分析",
+                        session_id,
                     )
+                    return
 
                 current_values = {
                     "affection": state.get("affection", 50),
@@ -372,7 +386,7 @@ class RelationSensePlugin(Star):
     @filter.command("重置关系", alias={"relation_reset"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
         session_id = event.unified_msg_origin
-        result = await self.admin.reset(session_id)
+        result = await self.admin.reset(session_id, event.get_platform_id(), event.get_sender_id())
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)

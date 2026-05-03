@@ -1,6 +1,6 @@
 name: astrbot_plugin_relation_sense
 display_name: 关系感知
-version: 1.2.0
+version: 1.2.1
 description: 感知与用户的关系状态，补全对双方关系亲密度、对方画像和对话氛围的认知
 author: Inoryu7z
 repo: https://github.com/Inoryu7z/astrbot_plugin_relation_sense

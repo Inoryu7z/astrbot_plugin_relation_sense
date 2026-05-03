@@ -1,4 +1,4 @@
-﻿﻿﻿[![RelationSense Counter](https://count.getloli.com/get/@Inoryu7z.relationsense?theme=miku)](https://github.com/Inoryu7z/astrbot_plugin_relation_sense)
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿[![RelationSense Counter](https://count.getloli.com/get/@Inoryu7z.relationsense?theme=miku)](https://github.com/Inoryu7z/astrbot_plugin_relation_sense)
 
 # 💞 RelationSense · 关系感知
 
