@@ -66,6 +66,7 @@ class DimensionTracker:
         self,
         current_values: dict,
         analysis_result: dict,
+        is_initial: bool = False,
     ) -> tuple[dict, bool]:
         """将 LLM 分析结果应用到五维数值上。
 
@@ -98,17 +99,17 @@ class DimensionTracker:
             new_score = dim_data.get("score")
             if new_score is not None and isinstance(new_score, (int, float)):
                 clamped = max(0.0, min(100.0, float(new_score)))
-                # 维度惯性：限制单轮最大变化幅度
                 old_val = new_values.get(dim, 0)
-                delta = clamped - old_val
-                max_delta = MAX_DELTA_PER_ROUND.get(dim, 20)
-                if abs(delta) > max_delta:
-                    direction = 1 if delta > 0 else -1
-                    clamped = old_val + direction * max_delta
-                    logger.debug(
-                        "[RelationSense] 维度 %s 变化 %.1f 超过上限 %.1f，截断为 %.1f",
-                        dim, delta, max_delta, clamped,
-                    )
+                if not is_initial:
+                    delta = clamped - old_val
+                    max_delta = MAX_DELTA_PER_ROUND.get(dim, 20)
+                    if abs(delta) > max_delta:
+                        direction = 1 if delta > 0 else -1
+                        clamped = old_val + direction * max_delta
+                        logger.debug(
+                            "[RelationSense] 维度 %s 变化 %.1f 超过上限 %.1f，截断为 %.1f",
+                            dim, delta, max_delta, clamped,
+                        )
                 if abs(clamped - old_val) > 0.01:
                     new_values[dim] = round(clamped, 1)
                     has_changes = True

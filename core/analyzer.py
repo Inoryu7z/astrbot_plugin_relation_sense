@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from astrbot.api import logger
 
-from ..statics.prompts import ANALYZER_SYSTEM_PROMPT, ANALYZER_USER_PROMPT, BACKFILL_USER_PROMPT
+from ..statics.prompts import ANALYZER_SYSTEM_PROMPT, ANALYZER_USER_PROMPT, ANALYZER_USER_PROMPT_INITIAL, BACKFILL_USER_PROMPT
 
 
 def _parse_json_response(raw_text: str) -> Optional[dict]:
@@ -56,6 +56,7 @@ class RelationAnalyzer:
         bot_name: str = "Bot",
         user_name: str = "用户",
         persona_prompt: str = "",
+        is_initial: bool = False,
     ) -> Optional[dict]:
         """执行关系分析。
 
@@ -86,17 +87,24 @@ class RelationAnalyzer:
             trust_threshold=trust_threshold,
         )
 
-        user_prompt = ANALYZER_USER_PROMPT.format(
-            bot_name=bot_name,
-            user_name=user_name,
-            persona_prompt=persona_prompt if persona_prompt else "（无人设提示）",
-            dialogue_text=dialogue_text,
-            affection=current_values.get("affection", 50),
-            trust=current_values.get("trust", 30),
-            depth=current_values.get("depth", 20),
-            dependence=current_values.get("dependence", 10),
-            return_rate=current_values.get("return_rate", 0),
-        )
+        if is_initial:
+            user_prompt = ANALYZER_USER_PROMPT_INITIAL.format(
+                user_name=user_name,
+                persona_prompt=persona_prompt if persona_prompt else "（无人设提示）",
+                dialogue_text=dialogue_text,
+            )
+        else:
+            user_prompt = ANALYZER_USER_PROMPT.format(
+                bot_name=bot_name,
+                user_name=user_name,
+                persona_prompt=persona_prompt if persona_prompt else "（无人设提示）",
+                dialogue_text=dialogue_text,
+                affection=current_values.get("affection", 50),
+                trust=current_values.get("trust", 30),
+                depth=current_values.get("depth", 20),
+                dependence=current_values.get("dependence", 10),
+                return_rate=current_values.get("return_rate", 0),
+            )
 
         providers = [p for p in [primary, secondary] if p]
         for provider_id in providers:

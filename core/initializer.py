@@ -41,8 +41,8 @@ class RelationInitializer:
         """
         from ..core.tracker import DimensionTracker
         tracker = DimensionTracker(self.plugin)
-        cold_affection, cold_trust, cold_depth = 60.0, 50.0, 35.0
-        cold_dependence, cold_return_rate = 10.0, 5.0
+        cold_affection, cold_trust, cold_depth = 50.0, 30.0, 20.0
+        cold_dependence, cold_return_rate = 10.0, 0.0
         cold_level = tracker.compute_level(cold_affection, cold_trust, cold_depth)
 
         dialogue_text = await self._fetch_history(platform_id, user_id)

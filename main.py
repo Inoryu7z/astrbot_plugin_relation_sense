@@ -25,7 +25,7 @@ from .statics.defaults import COOLING_DEPENDENCE_DECAY, COOLING_DEPTH_DECAY, COO
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.2.1",
+    "1.2.2",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -47,7 +47,6 @@ class RelationSensePlugin(Star):
         self.admin = RelationAdminCommands(plugin=self)
         self.data_dir = data_dir
 
-        self._initialized_sessions: set[str] = set()
         self._bg_tasks: set[asyncio.Task] = set()
         self._analysis_locks: dict[str, asyncio.Lock] = {}
         self._last_persona: str = ""
@@ -96,23 +95,6 @@ class RelationSensePlugin(Star):
             if getattr(req, "system_prompt", ""):
                 self._last_persona = req.system_prompt
             self._last_activity[session_id] = time.time()
-
-            if session_id not in self._initialized_sessions:
-                self._initialized_sessions.add(session_id)
-                existing_state = await self.db.get_relation_state_safe(session_id)
-                if existing_state is None:
-                    platform_id = event.get_platform_id()
-                    user_id = event.get_sender_id()
-                    logger.info(
-                        "[RelationSense] 新会话触发回溯初始化 session=%s platform=%s user=%s",
-                        session_id, platform_id, user_id,
-                    )
-                    self._spawn_bg(self.initializer.initialize_session(
-                        session_id=session_id,
-                        platform_id=platform_id,
-                        user_id=user_id,
-                        persona_prompt=self._last_persona,
-                    ))
 
             if message_str and message_str.strip():
                 self.buffer.add_message(session_id, "user", message_str)
@@ -190,25 +172,27 @@ class RelationSensePlugin(Star):
 
                 # 获取当前状态
                 state = await self.db.get_relation_state_safe(session_id)
-                if state is None:
-                    if session_id not in self._initialized_sessions:
-                        logger.info(
-                            "[RelationSense] 会话 %s 尚未初始化，跳过本次分析，将触发回溯初始化",
-                            session_id,
-                        )
-                        self._initialized_sessions.add(session_id)
-                        self._spawn_bg(self.initializer.initialize_session(
-                            session_id=session_id,
-                            platform_id="",
-                            user_id="",
-                            persona_prompt=self._last_persona,
-                        ))
-                        return
-                    logger.info(
-                        "[RelationSense] 会话 %s 回溯初始化未完成，跳过本次分析",
-                        session_id,
+                is_initial = state is None
+                if is_initial:
+                    state = {
+                        "affection": 50.0,
+                        "trust": 30.0,
+                        "depth": 20.0,
+                        "dependence": 10.0,
+                        "return_rate": 0.0,
+                        "relation_level": "Lv0",
+                        "summary": "",
+                    }
+                    await self.db.upsert_relation_state(
+                        session_id=session_id,
+                        affection=50.0,
+                        trust=30.0,
+                        depth=20.0,
+                        dependence=10.0,
+                        return_rate=0.0,
+                        relation_level="Lv0",
+                        summary="",
                     )
-                    return
 
                 current_values = {
                     "affection": state.get("affection", 50),
@@ -228,6 +212,7 @@ class RelationSensePlugin(Star):
                     bot_name="Bot",
                     user_name="对方",
                     persona_prompt=self._last_persona,
+                    is_initial=is_initial,
                 )
 
                 if not result:
@@ -236,7 +221,7 @@ class RelationSensePlugin(Star):
 
                 # 应用分析结果
                 new_values, has_changes = self.tracker.apply_analysis_result(
-                    current_values, result,
+                    current_values, result, is_initial=is_initial,
                 )
 
                 if not has_changes:
