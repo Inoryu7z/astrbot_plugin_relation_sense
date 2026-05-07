@@ -10,13 +10,11 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .config import load_config
 from .core.buffer import MessageBuffer
 from .core.analyzer import RelationAnalyzer
 from .core.trigger import AnalysisTrigger
 from .core.tracker import DimensionTracker
 from .core.injector import RelationInjector
-from .core.initializer import RelationInitializer
 from .storage.db import RelationDatabase
 from .commands.admin import RelationAdminCommands
 from .statics.defaults import COOLING_DEPENDENCE_DECAY, COOLING_DEPTH_DECAY, COOLING_INACTIVITY_HOURS
@@ -61,7 +59,6 @@ class RelationSensePlugin(Star):
         self.trigger = AnalysisTrigger(self.db, plugin=self)
         self.tracker = DimensionTracker(plugin=self)
         self.injector = RelationInjector(plugin=self)
-        self.initializer = RelationInitializer(context, self.db, plugin=self)
         self.admin = RelationAdminCommands(plugin=self)
         self.data_dir = data_dir
 
@@ -73,8 +70,6 @@ class RelationSensePlugin(Star):
         self._last_activity: dict[str, float] = {}
         self._scenario_flags: dict[str, str] = {}
         self._live_user_state: dict[str, str] = {}
-
-        self.context._relation_sense_plugin = self
 
         logger.info("[RelationSense] 插件初始化完成")
 
@@ -106,8 +101,6 @@ class RelationSensePlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request_cache(self, event: AstrMessageEvent, req: ProviderRequest):
-        if not self._cfg("enable_plugin", True):
-            return
         try:
             session_id = event.unified_msg_origin
             message_str = getattr(event, "message_str", "") or ""
@@ -134,8 +127,6 @@ class RelationSensePlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response_cache(self, event: AstrMessageEvent, resp):
-        if not self._cfg("enable_plugin", True):
-            return
         try:
             session_id = event.unified_msg_origin
             completion = getattr(resp, "completion_text", "") or ""
@@ -149,8 +140,6 @@ class RelationSensePlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response_trigger(self, event: AstrMessageEvent, resp):
-        if not self._cfg("enable_plugin", True):
-            return
         try:
             session_id = event.unified_msg_origin
             should = await self.trigger.should_analyze(session_id)
@@ -174,9 +163,6 @@ class RelationSensePlugin(Star):
 
         async with lock:
             try:
-                if not self._cfg("enable_plugin", True):
-                    return {"ok": False, "error": "插件未启用"}
-
                 messages = self.buffer.get_recent(session_id, 80)
                 if not messages:
                     logger.debug("[RelationSense] 无缓存消息 session=%s，跳过分析", session_id)
@@ -341,7 +327,7 @@ class RelationSensePlugin(Star):
 
     @filter.on_llm_request()
     async def inject_relation_context(self, event: AstrMessageEvent, req: ProviderRequest):
-        if not self._cfg("enable_plugin", True) or not self._cfg("enable_injection", True):
+        if not self._cfg("enable_injection", True):
             return
 
         try:
@@ -364,6 +350,9 @@ class RelationSensePlugin(Star):
                 except Exception:
                     state["user_state"] = state.get("summary", "")
                     state["tone_hint"] = "保持自然语气回应"
+
+            if not state.get("user_state"):
+                state["user_state"] = "对方正在和你聊天。"
 
             injection = self.injector.build_injection(state, scenario=self._determine_scenario(session_id, state))
             if not injection:
@@ -388,11 +377,15 @@ class RelationSensePlugin(Star):
                 if live_state:
                     perception_text += f"\n\n你最近一次感知到对方的状态是：{live_state}\n如果这与当前对话不符，请更新你的感知。"
 
-                req.contexts.append({
-                    "role": "user",
-                    "content": perception_text,
-                    "_no_save": True,
-                })
+                contexts = getattr(req, "contexts", None)
+                if isinstance(contexts, list):
+                    contexts.append({
+                        "role": "user",
+                        "content": perception_text,
+                        "_no_save": True,
+                    })
+                else:
+                    logger.debug("[RelationSense] req.contexts 不可用，跳过实时感知注入（需 AstrBot v4.24.2+）")
 
             debug_mode = self._cfg("debug_mode", False)
             if debug_mode:
@@ -427,12 +420,16 @@ class RelationSensePlugin(Star):
 
             self._live_user_state[session_id] = new_state
 
-            resp.completion_text = re.sub(
+            cleaned = re.sub(
                 r"<update>.*?</update>",
                 "",
                 completion,
                 flags=re.DOTALL,
             ).strip()
+            try:
+                resp.completion_text = cleaned
+            except (AttributeError, TypeError):
+                logger.debug("[RelationSense] 无法修改 resp.completion_text，<update> 标签可能泄露到回复中")
 
             logger.info("[RelationSense] LLM 自主修正 user_state: session=%s state=%s", session_id, new_state)
         except Exception as e:
@@ -590,6 +587,8 @@ class RelationSensePlugin(Star):
 
     # ========== 定期清理 ==========
 
+    _MEMORY_CLEANUP_THRESHOLD = 3600 * 24 * 7
+
     async def _cleanup_loop(self):
         while True:
             try:
@@ -600,10 +599,29 @@ class RelationSensePlugin(Star):
                         "[RelationSense] 清理了 %d 条过期分析记录（保留 %d 天）",
                         deleted, retention,
                     )
+
+                now = time.time()
+                stale_cutoff = now - self._MEMORY_CLEANUP_THRESHOLD
+                stale_sessions = [
+                    sid for sid, ts in self._last_activity.items()
+                    if ts < stale_cutoff
+                ]
+                for sid in stale_sessions:
+                    self._analysis_locks.pop(sid, None)
+                    self._last_affection_change.pop(sid, None)
+                    self._just_returned.discard(sid)
+                    self._last_activity.pop(sid, None)
+                    self._scenario_flags.pop(sid, None)
+                    self._live_user_state.pop(sid, None)
+                    self.buffer.clear(sid)
+                if stale_sessions:
+                    logger.info(
+                        "[RelationSense] 清理了 %d 个过期会话的内存缓存",
+                        len(stale_sessions),
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.warning("[RelationSense] 清理异常: %s", e)
 
-            # 每 24 小时清理一次
             await asyncio.sleep(86400)

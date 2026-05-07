@@ -50,8 +50,9 @@ class RelationInjector:
         if scenario == "minimal" or (
             affection >= affection_threshold and trust >= trust_threshold
         ):
+            user_state_text = summary or user_state
             return INJECTION_MINIMAL.format(
-                user_state=summary or user_state or "对方今天主动找你聊天。" if summary or user_state else ""
+                user_state=user_state_text if user_state_text else "对方今天主动找你聊天。"
             )
 
         if scenario == "conflict":

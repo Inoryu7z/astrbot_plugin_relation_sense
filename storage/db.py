@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -14,61 +15,67 @@ class RelationDatabase:
         self.db_path = data_dir / "relation_sense.db"
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path), check_same_thread=False)
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
-        conn = self._get_conn()
-        cursor = conn.cursor()
+        with self._connect() as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS relation_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                persona_name TEXT DEFAULT '',
-                affection REAL DEFAULT 50,
-                trust REAL DEFAULT 30,
-                depth REAL DEFAULT 20,
-                dependence REAL DEFAULT 10,
-                return_rate REAL DEFAULT 0,
-                relation_level TEXT DEFAULT '',
-                summary TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(session_id)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS relation_state (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    persona_name TEXT DEFAULT '',
+                    affection REAL DEFAULT 50,
+                    trust REAL DEFAULT 30,
+                    depth REAL DEFAULT 20,
+                    dependence REAL DEFAULT 10,
+                    return_rate REAL DEFAULT 0,
+                    relation_level TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(session_id)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS analysis_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    persona_name TEXT DEFAULT '',
+                    raw_json TEXT,
+                    old_values TEXT,
+                    new_values TEXT,
+                    summary TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.0,
+                    trigger TEXT DEFAULT 'scheduled',
+                    source TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_analysis_session ON analysis_log(session_id)"
             )
-        """)
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS analysis_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                persona_name TEXT DEFAULT '',
-                raw_json TEXT,
-                old_values TEXT,
-                new_values TEXT,
-                summary TEXT DEFAULT '',
-                confidence REAL DEFAULT 0.0,
-                trigger TEXT DEFAULT 'scheduled',
-                source TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_analysis_session ON analysis_log(session_id)"
-        )
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS plugin_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS plugin_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        conn.commit()
-        self._run_migrations(conn)
-        conn.close()
+            conn.commit()
+            self._run_migrations(conn)
 
     def _run_migrations(self, conn: sqlite3.Connection):
         cursor = conn.cursor()
@@ -104,44 +111,43 @@ class RelationDatabase:
         relation_level: str = "",
         summary: str = "",
     ):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        cursor.execute(
-            "SELECT id FROM relation_state WHERE session_id = ?",
-            (session_id,),
-        )
-        existing = cursor.fetchone()
+            cursor.execute(
+                "SELECT id FROM relation_state WHERE session_id = ?",
+                (session_id,),
+            )
+            existing = cursor.fetchone()
 
-        if existing:
-            cursor.execute(
-                """UPDATE relation_state
-                   SET persona_name=?, affection=?, trust=?, depth=?,
-                       dependence=?, return_rate=?, relation_level=?,
-                       summary=?, updated_at=?
-                   WHERE session_id=?""",
-                (
-                    persona_name, affection, trust, depth,
-                    dependence, return_rate, relation_level,
-                    summary, now_str, session_id,
-                ),
-            )
-        else:
-            cursor.execute(
-                """INSERT INTO relation_state
-                   (session_id, persona_name, affection, trust, depth,
-                    dependence, return_rate, relation_level, summary,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id, persona_name, affection, trust, depth,
-                    dependence, return_rate, relation_level, summary,
-                    now_str, now_str,
-                ),
-            )
-        conn.commit()
-        conn.close()
+            if existing:
+                cursor.execute(
+                    """UPDATE relation_state
+                       SET persona_name=?, affection=?, trust=?, depth=?,
+                           dependence=?, return_rate=?, relation_level=?,
+                           summary=?, updated_at=?
+                       WHERE session_id=?""",
+                    (
+                        persona_name, affection, trust, depth,
+                        dependence, return_rate, relation_level,
+                        summary, now_str, session_id,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """INSERT INTO relation_state
+                       (session_id, persona_name, affection, trust, depth,
+                        dependence, return_rate, relation_level, summary,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id, persona_name, affection, trust, depth,
+                        dependence, return_rate, relation_level, summary,
+                        now_str, now_str,
+                    ),
+                )
+            conn.commit()
 
     async def upsert_relation_state(
         self,
@@ -161,60 +167,30 @@ class RelationDatabase:
             dependence, return_rate, relation_level, summary,
         )
 
-    def _sync_get_relation_state(self, session_id: str) -> Optional[dict]:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM relation_state WHERE session_id = ?",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        if row is None:
-            return None
-        col_names = [desc[0] for desc in cursor.description] if cursor.description else []
-        # 如果 col_names 为空（connection closed），手动指定
-        if not col_names:
-            col_names = [
-                "id", "session_id", "persona_name", "affection", "trust",
-                "depth", "dependence", "return_rate", "relation_level",
-                "summary", "created_at", "updated_at",
-            ]
-        return dict(zip(col_names, row))
-
-    async def get_relation_state(self, session_id: str) -> Optional[dict]:
-        return await self._execute(self._sync_get_relation_state, session_id)
-
     def _sync_get_relation_state_columns(self, session_id: str) -> Optional[dict]:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM relation_state WHERE session_id = ?",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            conn.close()
-            return None
-        # 在连接关闭前获取列名
-        col_names = [desc[0] for desc in cursor.description] if cursor.description else []
-        conn.close()
-        result = dict(zip(col_names, row)) if col_names else None
-        return result
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM relation_state WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+            return dict(zip(col_names, row)) if col_names else None
 
     async def get_relation_state_safe(self, session_id: str) -> Optional[dict]:
         return await self._execute(self._sync_get_relation_state_columns, session_id)
 
     def _sync_reset_relation_state(self, session_id: str):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            "DELETE FROM relation_state WHERE session_id = ?",
-            (session_id,),
-        )
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM relation_state WHERE session_id = ?",
+                (session_id,),
+            )
+            conn.commit()
 
     async def reset_relation_state(self, session_id: str):
         return await self._execute(self._sync_reset_relation_state, session_id)
@@ -233,21 +209,20 @@ class RelationDatabase:
         trigger: str = "scheduled",
         source: str = "",
     ):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            """INSERT INTO analysis_log
-               (session_id, persona_name, raw_json, old_values, new_values,
-                summary, confidence, trigger, source, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id, persona_name, raw_json, old_values, new_values,
-                summary, confidence, trigger, source, now_str,
-            ),
-        )
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                """INSERT INTO analysis_log
+                   (session_id, persona_name, raw_json, old_values, new_values,
+                    summary, confidence, trigger, source, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, persona_name, raw_json, old_values, new_values,
+                    summary, confidence, trigger, source, now_str,
+                ),
+            )
+            conn.commit()
 
     async def add_analysis_log(
         self,
@@ -268,41 +243,38 @@ class RelationDatabase:
         )
 
     def _sync_get_recent_analysis(self, session_id: str, limit: int = 5) -> list[dict]:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT * FROM analysis_log
-               WHERE session_id = ?
-               ORDER BY id DESC LIMIT ?""",
-            (session_id, limit),
-        )
-        rows = cursor.fetchall()
-        if rows:
-            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
-            conn.close()
-            return [dict(zip(col_names, r)) for r in rows] if col_names else []
-        conn.close()
-        return []
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM analysis_log
+                   WHERE session_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (session_id, limit),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+                return [dict(zip(col_names, r)) for r in rows] if col_names else []
+            return []
 
     async def get_recent_analysis(self, session_id: str, limit: int = 5) -> list[dict]:
         return await self._execute(self._sync_get_recent_analysis, session_id, limit)
 
     def _sync_get_last_analysis_at(self, session_id: str) -> float:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT created_at FROM analysis_log WHERE session_id = ? ORDER BY id DESC LIMIT 1",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        if row and row[0]:
-            try:
-                dt = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-                return dt.timestamp()
-            except ValueError:
-                pass
-        return 0.0
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT created_at FROM analysis_log WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    dt = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                    return dt.timestamp()
+                except ValueError:
+                    pass
+            return 0.0
 
     async def get_last_analysis_at(self, session_id: str) -> float:
         return await self._execute(self._sync_get_last_analysis_at, session_id)
@@ -310,34 +282,32 @@ class RelationDatabase:
     # ========== 插件元数据 ==========
 
     def _sync_get_meta_value(self, key: str, default: Any = None) -> Any:
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM plugin_meta WHERE key = ?", (key,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            try:
-                return json.loads(row[0])
-            except (json.JSONDecodeError, TypeError):
-                return row[0]
-        return default
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM plugin_meta WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            if row:
+                try:
+                    return json.loads(row[0])
+                except (json.JSONDecodeError, TypeError):
+                    return row[0]
+            return default
 
     async def get_meta_value(self, key: str, default: Any = None) -> Any:
         return await self._execute(self._sync_get_meta_value, key, default)
 
     def _sync_set_meta_value(self, key: str, value: Any):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        json_val = json.dumps(value, ensure_ascii=False)
-        cursor.execute(
-            """INSERT INTO plugin_meta (key, value, updated_at)
-               VALUES (?, ?, ?)
-               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
-            (key, json_val, now_str),
-        )
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            json_val = json.dumps(value, ensure_ascii=False)
+            cursor.execute(
+                """INSERT INTO plugin_meta (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, json_val, now_str),
+            )
+            conn.commit()
 
     async def set_meta_value(self, key: str, value: Any):
         return await self._execute(self._sync_set_meta_value, key, value)
@@ -367,14 +337,13 @@ class RelationDatabase:
     # ========== 数据清理 ==========
 
     def _sync_clean_expired(self, days_limit: int):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cutoff_date = (datetime.now() - timedelta(days=days_limit)).strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("DELETE FROM analysis_log WHERE created_at < ?", (cutoff_date,))
-        deleted = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return deleted
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cutoff_date = (datetime.now() - timedelta(days=days_limit)).strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute("DELETE FROM analysis_log WHERE created_at < ?", (cutoff_date,))
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
 
     async def clean_expired(self, days_limit: int):
         return await self._execute(self._sync_clean_expired, days_limit)

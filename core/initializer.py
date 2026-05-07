@@ -118,10 +118,6 @@ class RelationInitializer:
             )
             return False
 
-        # 从结果中提取五维数值
-        from ..core.tracker import DimensionTracker
-        tracker = DimensionTracker(self.plugin)
-
         new_affection = float(_safe_get_score(result, "affection", 50))
         new_trust = float(_safe_get_score(result, "trust", 30))
         new_depth = float(_safe_get_score(result, "depth", 20))

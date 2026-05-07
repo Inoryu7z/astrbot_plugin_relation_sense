@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 
 @dataclass
 class PluginConfig:
-    enable_plugin: bool = True
     enable_injection: bool = True
 
     analysis_interval_minutes: int = 30
@@ -27,7 +26,6 @@ class PluginConfig:
 
     def to_dict(self) -> dict:
         return {
-            "enable_plugin": self.enable_plugin,
             "enable_injection": self.enable_injection,
             "analysis_interval_minutes": self.analysis_interval_minutes,
             "min_new_messages": self.min_new_messages,
@@ -48,7 +46,6 @@ class PluginConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "PluginConfig":
         return cls(
-            enable_plugin=data.get("enable_plugin", True),
             enable_injection=data.get("enable_injection", True),
             analysis_interval_minutes=data.get("analysis_interval_minutes", 30),
             min_new_messages=data.get("min_new_messages", 15),
@@ -75,7 +72,7 @@ DEFAULT_FIVE_DIMS = {
     "return_rate": 0.0,
 }
 
-DEFAULT_LEVEL = "Lv1"
+DEFAULT_LEVEL = "Lv0"
 
 RELATION_LEVELS = [
     (0, 12, "Lv-2", "敌意"),
