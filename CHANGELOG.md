@@ -1,4 +1,20 @@
-### v1.2.2
+### v1.3.0
+
+**🏗️ 三层架构重构：防注入累积 + 实时感知 + 自主修正**
+
+**Layer 1 — 基础修复（默认开启，全版本兼容）**
+* 每次注入前先删除旧的 RS_Injection 块，用 `<!-- RS_Injection -->` / `<!-- /RS_Injection -->` 包裹注入内容，解决 system_prompt 注入累积
+
+**Layer 2 — 对话 LLM 实时感知（开关，默认关闭，需 v4.24.2+）**
+* 新增 `enable_live_perception` 配置项
+* 开启后不再从 DB 读取 `user_state` / `tone_hint`，改由对话 LLM 通过 `_no_save` 上下文消息实时感知对方状态
+* 五维数值仍由异步分析 LLM 后台更新
+
+**Layer 3 — LLM 自主修正注入（开关，默认关闭，需 v4.24.2+）**
+* 新增 `enable_live_perception_update` 配置项
+* 允许 LLM 在发现感知过时时通过 `<update>` 标签修正（如早上"刚醒"到晚上还在则自动修正）
+* 插件自动解析 `<update>` 标签，更新内存缓存并从回复中移除标签
+* `metadata.yaml` 新增 `astrbot_version` 字段
 
 **⚡ 首次印象评估模式 + 手动分析通知**
 

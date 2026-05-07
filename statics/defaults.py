@@ -22,6 +22,8 @@ class PluginConfig:
     buffer_max_size: int = 100
 
     debug_mode: bool = False
+    enable_live_perception: bool = False
+    enable_live_perception_update: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +41,8 @@ class PluginConfig:
             "history_retention_days": self.history_retention_days,
             "buffer_max_size": self.buffer_max_size,
             "debug_mode": self.debug_mode,
+            "enable_live_perception": self.enable_live_perception,
+            "enable_live_perception_update": self.enable_live_perception_update,
         }
 
     @classmethod
@@ -58,6 +62,8 @@ class PluginConfig:
             history_retention_days=data.get("history_retention_days", 60),
             buffer_max_size=data.get("buffer_max_size", 100),
             debug_mode=data.get("debug_mode", False),
+            enable_live_perception=data.get("enable_live_perception", False),
+            enable_live_perception_update=data.get("enable_live_perception_update", False),
         )
 
 

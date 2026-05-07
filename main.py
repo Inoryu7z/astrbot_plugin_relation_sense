@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -19,13 +20,30 @@ from .core.initializer import RelationInitializer
 from .storage.db import RelationDatabase
 from .commands.admin import RelationAdminCommands
 from .statics.defaults import COOLING_DEPENDENCE_DECAY, COOLING_DEPTH_DECAY, COOLING_INACTIVITY_HOURS
+from .statics.prompts import LIVE_PERCEPTION_PROMPT, LIVE_PERCEPTION_UPDATE_PROMPT
+
+RS_INJECTION_HEADER = "<!-- RS_Injection -->"
+RS_INJECTION_FOOTER = "<!-- /RS_Injection -->"
+
+_RS_INJECTION_PATTERN = re.compile(
+    re.escape(RS_INJECTION_HEADER) + r".*?" + re.escape(RS_INJECTION_FOOTER),
+    flags=re.DOTALL,
+)
+
+
+def _remove_rs_injection(system_prompt):
+    if not system_prompt:
+        return system_prompt or "", False
+    cleaned = _RS_INJECTION_PATTERN.sub("", system_prompt)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, cleaned != system_prompt
 
 
 @register(
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.2.2",
+    "1.3.0",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -54,6 +72,7 @@ class RelationSensePlugin(Star):
         self._just_returned: set[str] = set()
         self._last_activity: dict[str, float] = {}
         self._scenario_flags: dict[str, str] = {}
+        self._live_user_state: dict[str, str] = {}
 
         self.context._relation_sense_plugin = self
 
@@ -331,15 +350,20 @@ class RelationSensePlugin(Star):
             if state is None:
                 return
 
-            # 获取额外存储的 user_state 和 tone_hint
-            try:
-                user_state_meta = await self.db.get_meta_value(f"user_state_{session_id}", "")
-                tone_hint_meta = await self.db.get_meta_value(f"tone_hint_{session_id}", "")
-                state["user_state"] = user_state_meta or state.get("summary", "")
-                state["tone_hint"] = tone_hint_meta or "保持自然语气回应"
-            except Exception:
-                state["user_state"] = state.get("summary", "")
+            use_live = self._cfg("enable_live_perception", False)
+
+            if use_live:
+                state["user_state"] = ""
                 state["tone_hint"] = "保持自然语气回应"
+            else:
+                try:
+                    user_state_meta = await self.db.get_meta_value(f"user_state_{session_id}", "")
+                    tone_hint_meta = await self.db.get_meta_value(f"tone_hint_{session_id}", "")
+                    state["user_state"] = user_state_meta or state.get("summary", "")
+                    state["tone_hint"] = tone_hint_meta or "保持自然语气回应"
+                except Exception:
+                    state["user_state"] = state.get("summary", "")
+                    state["tone_hint"] = "保持自然语气回应"
 
             injection = self.injector.build_injection(state, scenario=self._determine_scenario(session_id, state))
             if not injection:
@@ -347,17 +371,72 @@ class RelationSensePlugin(Star):
 
             if getattr(req, "system_prompt", None) is None:
                 req.system_prompt = ""
-            req.system_prompt += injection
+
+            req.system_prompt, removed = _remove_rs_injection(req.system_prompt)
+            if removed:
+                logger.debug("[RelationSense] 已清理上次注入: session=%s", session_id)
+
+            req.system_prompt += "\n" + RS_INJECTION_HEADER + "\n" + injection + "\n" + RS_INJECTION_FOOTER
+
+            if use_live:
+                if self._cfg("enable_live_perception_update", False):
+                    perception_text = LIVE_PERCEPTION_UPDATE_PROMPT
+                else:
+                    perception_text = LIVE_PERCEPTION_PROMPT
+
+                live_state = self._live_user_state.get(session_id, "")
+                if live_state:
+                    perception_text += f"\n\n你最近一次感知到对方的状态是：{live_state}\n如果这与当前对话不符，请更新你的感知。"
+
+                req.contexts.append({
+                    "role": "user",
+                    "content": perception_text,
+                    "_no_save": True,
+                })
 
             debug_mode = self._cfg("debug_mode", False)
             if debug_mode:
                 logger.info(
-                    "[RelationSense] 已注入关系上下文 会话=%s 好感度=%.1f 信任度=%.1f\n===== 注入内容 =====\n%s\n==================",
-                    session_id, state.get("affection", 0), state.get("trust", 0), injection.strip(),
+                    "[RelationSense] 已注入关系上下文 会话=%s 好感度=%.1f 信任度=%.1f 实时感知=%s\n===== 注入内容 =====\n%s\n==================",
+                    session_id, state.get("affection", 0), state.get("trust", 0), use_live, injection.strip(),
                 )
 
         except Exception as e:
             logger.debug("[RelationSense] 注入失败: %s", e)
+
+    @filter.on_llm_response()
+    async def on_llm_response_parse_update(self, event: AstrMessageEvent, resp):
+        if not self._cfg("enable_live_perception", False):
+            return
+        if not self._cfg("enable_live_perception_update", False):
+            return
+
+        try:
+            session_id = event.unified_msg_origin
+            completion = getattr(resp, "completion_text", "") or ""
+            if not completion:
+                return
+
+            match = re.search(r"<update>(.*?)</update>", completion, re.DOTALL)
+            if not match:
+                return
+
+            new_state = match.group(1).strip()
+            if not new_state:
+                return
+
+            self._live_user_state[session_id] = new_state
+
+            resp.completion_text = re.sub(
+                r"<update>.*?</update>",
+                "",
+                completion,
+                flags=re.DOTALL,
+            ).strip()
+
+            logger.info("[RelationSense] LLM 自主修正 user_state: session=%s state=%s", session_id, new_state)
+        except Exception as e:
+            logger.debug("[RelationSense] update 标签解析失败: %s", e)
 
     # ========== 管理命令 ==========
 

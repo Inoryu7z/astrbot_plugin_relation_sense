@@ -72,5 +72,17 @@
     "type": "bool",
     "default": false,
     "hint": "开启后注入的提示词内容会输出到日志，排查问题时再开。"
+  },
+  "enable_live_perception": {
+    "description": "对话模型自主感知",
+    "type": "bool",
+    "default": false,
+    "hint": "需要 AstrBot v4.24.2+。开启后不再使用 DB 中可能过时的 user_state 和 tone_hint，改由对话 LLM 实时感知。"
+  },
+  "enable_live_perception_update": {
+    "description": "允许自主修正注入",
+    "type": "bool",
+    "default": false,
+    "hint": "需要先开启「对话模型自主感知」。允许 LLM 在发现感知过时时通过 <update> 标签修正。"
   }
 }
