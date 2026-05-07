@@ -8,14 +8,8 @@ class MessageBuffer:
         self.max_size = max_size
         self._buffers: Dict[str, deque] = {}
 
-    def add_message(self, session_id: str, role: str, content: str):
-        """添加一条消息到缓存。
-
-        Args:
-            session_id: 会话标识
-            role: 'user' 或 'assistant'
-            content: 消息文本
-        """
+    def add_message(self, session_id: str, role: str, content: str,
+                    sender_id: str = "", sender_name: str = "", is_at_bot: bool = False):
         if not content or not content.strip():
             return
 
@@ -26,6 +20,9 @@ class MessageBuffer:
             "role": role,
             "content": content.strip(),
             "ts": time.time(),
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "is_at_bot": is_at_bot,
         })
 
     def get_recent(self, session_id: str, count: int = 50) -> list[dict]:
@@ -68,6 +65,16 @@ class MessageBuffer:
         self._buffers.pop(session_id, None)
 
     def get_total_count(self, session_id: str) -> int:
-        """获取指定会话缓存中的总消息数。"""
         buf = self._buffers.get(session_id)
         return len(buf) if buf else 0
+
+    def format_group_dialogue(self, session_id: str, count: int = 80, bot_name: str = "你") -> str:
+        messages = self.get_recent(session_id, count)
+        lines = []
+        for msg in messages:
+            if msg["role"] == "assistant":
+                lines.append(f"{bot_name}: {msg['content']}")
+            else:
+                name = msg.get("sender_name") or msg.get("sender_id") or "用户"
+                lines.append(f"{name}: {msg['content']}")
+        return "\n".join(lines)

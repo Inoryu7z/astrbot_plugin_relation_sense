@@ -24,6 +24,12 @@ class PluginConfig:
     enable_live_perception: bool = False
     enable_live_perception_update: bool = False
 
+    enable_group_mode: bool = False
+    unify_cross_session: bool = False
+    group_active_days: int = 3
+    group_analysis_interval_minutes: int = 120
+    group_max_active_users: int = 20
+
     def to_dict(self) -> dict:
         return {
             "enable_injection": self.enable_injection,
@@ -41,6 +47,11 @@ class PluginConfig:
             "debug_mode": self.debug_mode,
             "enable_live_perception": self.enable_live_perception,
             "enable_live_perception_update": self.enable_live_perception_update,
+            "enable_group_mode": self.enable_group_mode,
+            "unify_cross_session": self.unify_cross_session,
+            "group_active_days": self.group_active_days,
+            "group_analysis_interval_minutes": self.group_analysis_interval_minutes,
+            "group_max_active_users": self.group_max_active_users,
         }
 
     @classmethod
@@ -61,6 +72,11 @@ class PluginConfig:
             debug_mode=data.get("debug_mode", False),
             enable_live_perception=data.get("enable_live_perception", False),
             enable_live_perception_update=data.get("enable_live_perception_update", False),
+            enable_group_mode=data.get("enable_group_mode", False),
+            unify_cross_session=data.get("unify_cross_session", False),
+            group_active_days=data.get("group_active_days", 3),
+            group_analysis_interval_minutes=data.get("group_analysis_interval_minutes", 120),
+            group_max_active_users=data.get("group_max_active_users", 20),
         )
 
 

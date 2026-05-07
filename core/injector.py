@@ -7,6 +7,12 @@ from ..statics.prompts import (
     INJECTION_NORMAL,
     INJECTION_RETURN,
     INJECTION_SILENCE,
+    GROUP_INJECTION_AMBIGUOUS,
+    GROUP_INJECTION_CONFLICT,
+    GROUP_INJECTION_MINIMAL,
+    GROUP_INJECTION_NORMAL,
+    GROUP_INJECTION_RETURN,
+    GROUP_INJECTION_SILENCE,
 )
 
 
@@ -100,3 +106,46 @@ class RelationInjector:
         if depth > 20:
             return "日常、闲聊"
         return "平淡、初识"
+
+    def build_group_injection(
+        self,
+        state: dict,
+        sender_name: str,
+        active_users_summary: str = "",
+        scenario: str = "normal",
+    ) -> Optional[str]:
+        if not self._cfg("enable_injection", True):
+            return None
+
+        affection = state.get("affection", 0)
+        trust = state.get("trust", 0)
+        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
+        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
+        user_state = state.get("user_state", "")
+        tone_hint = state.get("tone_hint", "")
+
+        fmt_kwargs = {
+            "sender_name": sender_name,
+            "sender_user_state": user_state or "",
+            "sender_tone_hint": tone_hint or "保持自然语气回应",
+            "active_users_summary": active_users_summary or "无",
+        }
+
+        if scenario == "minimal" or (
+            affection >= affection_threshold and trust >= trust_threshold
+        ):
+            return GROUP_INJECTION_MINIMAL.format(**fmt_kwargs)
+
+        if scenario == "conflict":
+            return GROUP_INJECTION_CONFLICT.format(**fmt_kwargs)
+
+        if scenario == "ambiguous":
+            return GROUP_INJECTION_AMBIGUOUS.format(**fmt_kwargs)
+
+        if scenario == "return":
+            return GROUP_INJECTION_RETURN.format(**fmt_kwargs)
+
+        if scenario == "silence":
+            return GROUP_INJECTION_SILENCE.format(**fmt_kwargs)
+
+        return GROUP_INJECTION_NORMAL.format(**fmt_kwargs)

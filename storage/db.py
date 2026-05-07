@@ -74,6 +74,27 @@ class RelationDatabase:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_user_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT NOT NULL,
+                    group_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    user_name TEXT DEFAULT '',
+                    last_active_at TIMESTAMP,
+                    last_analyzed_at TIMESTAMP DEFAULT '1970-01-01 00:00:00',
+                    msg_count_since_analysis INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(platform, group_id, user_id)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gua_group ON group_user_activity(platform, group_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gua_last_active ON group_user_activity(last_active_at)"
+            )
+
             conn.commit()
             self._run_migrations(conn)
 
@@ -347,3 +368,170 @@ class RelationDatabase:
 
     async def clean_expired(self, days_limit: int):
         return await self._execute(self._sync_clean_expired, days_limit)
+
+    # ========== 群聊活跃用户 ==========
+
+    def _sync_touch_user_activity(
+        self, platform: str, group_id: str, user_id: str, user_name: str
+    ):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                """INSERT INTO group_user_activity (platform, group_id, user_id, user_name, last_active_at, msg_count_since_analysis)
+                   VALUES (?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(platform, group_id, user_id) DO UPDATE SET
+                       user_name=excluded.user_name,
+                       last_active_at=excluded.last_active_at,
+                       msg_count_since_analysis=msg_count_since_analysis + 1""",
+                (platform, group_id, user_id, user_name, now_str),
+            )
+            conn.commit()
+
+    async def touch_user_activity(
+        self, platform: str, group_id: str, user_id: str, user_name: str
+    ):
+        return await self._execute(
+            self._sync_touch_user_activity, platform, group_id, user_id, user_name
+        )
+
+    def _sync_get_group_active_users(
+        self, platform: str, group_id: str, active_days: int = 3
+    ) -> list[dict]:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(days=active_days)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            cursor.execute(
+                """SELECT platform, group_id, user_id, user_name, last_active_at,
+                          last_analyzed_at, msg_count_since_analysis
+                   FROM group_user_activity
+                   WHERE platform=? AND group_id=? AND last_active_at >= ?
+                   ORDER BY last_active_at DESC""",
+                (platform, group_id, cutoff),
+            )
+            rows = cursor.fetchall()
+            col_names = (
+                [desc[0] for desc in cursor.description] if cursor.description else []
+            )
+            return [dict(zip(col_names, r)) for r in rows] if col_names else []
+
+    async def get_group_active_users(
+        self, platform: str, group_id: str, active_days: int = 3
+    ) -> list[dict]:
+        return await self._execute(
+            self._sync_get_group_active_users, platform, group_id, active_days
+        )
+
+    def _sync_get_stale_active_users(
+        self,
+        platform: str,
+        group_id: str,
+        stale_hours: float = 2.0,
+        min_msgs: int = 10,
+        limit: int = 5,
+    ) -> list[dict]:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(hours=stale_hours)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            cursor.execute(
+                """SELECT platform, group_id, user_id, user_name, last_active_at,
+                          last_analyzed_at, msg_count_since_analysis
+                   FROM group_user_activity
+                   WHERE platform=? AND group_id=?
+                     AND last_analyzed_at < ?
+                     AND msg_count_since_analysis >= ?
+                   ORDER BY last_active_at DESC
+                   LIMIT ?""",
+                (platform, group_id, cutoff, min_msgs, limit),
+            )
+            rows = cursor.fetchall()
+            col_names = (
+                [desc[0] for desc in cursor.description] if cursor.description else []
+            )
+            return [dict(zip(col_names, r)) for r in rows] if col_names else []
+
+    async def get_stale_active_users(
+        self,
+        platform: str,
+        group_id: str,
+        stale_hours: float = 2.0,
+        min_msgs: int = 10,
+        limit: int = 5,
+    ) -> list[dict]:
+        return await self._execute(
+            self._sync_get_stale_active_users,
+            platform, group_id, stale_hours, min_msgs, limit,
+        )
+
+    def _sync_mark_user_analyzed(self, platform: str, group_id: str, user_id: str):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                """UPDATE group_user_activity
+                   SET last_analyzed_at=?, msg_count_since_analysis=0
+                   WHERE platform=? AND group_id=? AND user_id=?""",
+                (now_str, platform, group_id, user_id),
+            )
+            conn.commit()
+
+    async def mark_user_analyzed(
+        self, platform: str, group_id: str, user_id: str
+    ):
+        return await self._execute(
+            self._sync_mark_user_analyzed, platform, group_id, user_id
+        )
+
+    def _sync_clean_inactive_users(
+        self, platform: str, group_id: str, active_days: int = 3
+    ):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(days=active_days)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            cursor.execute(
+                """DELETE FROM group_user_activity
+                   WHERE platform=? AND group_id=? AND last_active_at < ?""",
+                (platform, group_id, cutoff),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
+    async def clean_inactive_users(
+        self, platform: str, group_id: str, active_days: int = 3
+    ):
+        return await self._execute(
+            self._sync_clean_inactive_users, platform, group_id, active_days
+        )
+
+    def _sync_get_user_last_analyzed_at(
+        self, platform: str, group_id: str, user_id: str
+    ) -> float:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT last_analyzed_at FROM group_user_activity
+                   WHERE platform=? AND group_id=? AND user_id=?""",
+                (platform, group_id, user_id),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    dt = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                    return dt.timestamp()
+                except ValueError:
+                    pass
+            return 0.0
+
+    async def get_user_last_analyzed_at(
+        self, platform: str, group_id: str, user_id: str
+    ) -> float:
+        return await self._execute(
+            self._sync_get_user_last_analyzed_at, platform, group_id, user_id
+        )

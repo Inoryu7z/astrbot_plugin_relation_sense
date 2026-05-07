@@ -41,7 +41,7 @@ def _remove_rs_injection(system_prompt):
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.3.0",
+    "1.4.0",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -70,6 +70,7 @@ class RelationSensePlugin(Star):
         self._last_activity: dict[str, float] = {}
         self._scenario_flags: dict[str, str] = {}
         self._live_user_state: dict[str, str] = {}
+        self._group_user_last_analyzed: dict[str, float] = {}
 
         logger.info("[RelationSense] 插件初始化完成")
 
@@ -77,6 +78,9 @@ class RelationSensePlugin(Star):
         logger.info("[RelationSense] 插件启动，数据库就绪")
         self._spawn_bg(self._cleanup_loop())
         self._spawn_bg(self._cooling_loop())
+        if self._cfg("enable_group_mode", False):
+            self._spawn_bg(self._group_batch_analysis_loop())
+            logger.info("[RelationSense] 群聊模式已启用，批量分析循环已启动")
 
     async def terminate(self):
         logger.info("[RelationSense] 插件已卸载")
@@ -97,19 +101,56 @@ class RelationSensePlugin(Star):
             self._analysis_locks[session_id] = asyncio.Lock()
         return self._analysis_locks[session_id]
 
+    def _resolve_session_key(self, event: AstrMessageEvent) -> tuple[str, bool]:
+        is_private = event.is_private_chat()
+        if is_private:
+            if self._cfg("unify_cross_session", False):
+                platform = event.get_platform_name()
+                user_id = event.get_sender_id()
+                return f"user_{platform}_{user_id}", False
+            return event.unified_msg_origin, False
+
+        if not self._cfg("enable_group_mode", False):
+            return event.unified_msg_origin, True
+
+        platform = event.get_platform_name()
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+
+        if self._cfg("unify_cross_session", False):
+            return f"user_{platform}_{user_id}", True
+
+        return f"{platform}_{group_id}_{user_id}", True
+
     # ========== 消息监听 & 缓存 ==========
 
     @filter.on_llm_request()
     async def on_llm_request_cache(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
-            session_id = event.unified_msg_origin
+            session_id, is_group = self._resolve_session_key(event)
             message_str = getattr(event, "message_str", "") or ""
             if getattr(req, "system_prompt", ""):
                 self._last_persona = req.system_prompt
             self._last_activity[session_id] = time.time()
 
             if message_str and message_str.strip():
-                self.buffer.add_message(session_id, "user", message_str)
+                sender_id = ""
+                sender_name = ""
+                is_at_bot = False
+
+                if is_group and self._cfg("enable_group_mode", False):
+                    sender_id = event.get_sender_id() or ""
+                    sender_name = getattr(event, "get_sender_name", lambda: "")() or ""
+                    is_at_bot = getattr(event, "is_at_bot", lambda: False)()
+
+                    platform = event.get_platform_name()
+                    group_id = event.get_group_id()
+                    await self.db.touch_user_activity(platform, group_id, sender_id, sender_name)
+
+                self.buffer.add_message(
+                    session_id, "user", message_str,
+                    sender_id=sender_id, sender_name=sender_name, is_at_bot=is_at_bot,
+                )
                 await self.db.increment_msg_count(session_id)
 
                 event_type_keyword = self.trigger.detect_event_trigger(message_str)
@@ -121,14 +162,18 @@ class RelationSensePlugin(Star):
                     )
                     if event_type == "return":
                         self._just_returned.add(session_id)
-                    self._spawn_bg(self._do_analyze(session_id, trigger="event"))
+
+                    if is_group and self._cfg("enable_group_mode", False):
+                        self._spawn_bg(self._do_group_analyze(session_id, trigger="event"))
+                    else:
+                        self._spawn_bg(self._do_analyze(session_id, trigger="event"))
         except Exception as e:
             logger.debug("[RelationSense] 用户消息缓存失败: %s", e)
 
     @filter.on_llm_response()
     async def on_llm_response_cache(self, event: AstrMessageEvent, resp):
         try:
-            session_id = event.unified_msg_origin
+            session_id, is_group = self._resolve_session_key(event)
             completion = getattr(resp, "completion_text", "") or ""
             if completion.strip():
                 self.buffer.add_message(session_id, "assistant", completion.strip())
@@ -141,14 +186,17 @@ class RelationSensePlugin(Star):
     @filter.on_llm_response()
     async def on_llm_response_trigger(self, event: AstrMessageEvent, resp):
         try:
-            session_id = event.unified_msg_origin
+            session_id, is_group = self._resolve_session_key(event)
             should = await self.trigger.should_analyze(session_id)
             if should:
                 logger.info(
                     "[RelationSense] 常规触发分析 session=%s",
                     session_id,
                 )
-                self._spawn_bg(self._do_analyze(session_id, trigger="scheduled"))
+                if is_group and self._cfg("enable_group_mode", False):
+                    self._spawn_bg(self._do_group_analyze(session_id, trigger="scheduled"))
+                else:
+                    self._spawn_bg(self._do_analyze(session_id, trigger="scheduled"))
         except Exception as e:
             logger.debug("[RelationSense] 触发条件检查失败: %s", e)
 
@@ -323,6 +371,358 @@ class RelationSensePlugin(Star):
                 )
                 return {"ok": False, "error": f"分析异常: {e}"}
 
+    # ========== 群聊分析流程 ==========
+
+    async def _do_group_analyze(self, session_key: str, trigger: str = "scheduled") -> dict:
+        lock = self._get_lock(session_key)
+        if lock.locked():
+            logger.debug("[RelationSense] 群聊分析已在执行 session=%s，跳过", session_key)
+            return {"ok": False, "error": "分析已在执行中"}
+
+        async with lock:
+            try:
+                group_key = self._extract_group_key(session_key)
+                if not group_key:
+                    return await self._do_analyze(session_key, trigger=trigger)
+
+                dialogue_text = await self._get_group_dialogue(group_key)
+                if not dialogue_text:
+                    logger.debug("[RelationSense] 群聊无缓存消息 session=%s，跳过分析", session_key)
+                    return {"ok": False, "error": "暂无缓存消息"}
+
+                state = await self.db.get_relation_state_safe(session_key)
+                is_initial = state is None
+                if is_initial:
+                    state = {
+                        "affection": 50.0, "trust": 30.0, "depth": 20.0,
+                        "dependence": 10.0, "return_rate": 0.0,
+                        "relation_level": "Lv0", "summary": "",
+                    }
+                    await self.db.upsert_relation_state(
+                        session_id=session_key, affection=50.0, trust=30.0,
+                        depth=20.0, dependence=10.0, return_rate=0.0,
+                        relation_level="Lv0", summary="",
+                    )
+
+                current_values = {
+                    "affection": state.get("affection", 50),
+                    "trust": state.get("trust", 30),
+                    "depth": state.get("depth", 20),
+                    "dependence": state.get("dependence", 10),
+                    "return_rate": state.get("return_rate", 0),
+                }
+
+                old_vals_json = json.dumps(current_values, ensure_ascii=False)
+
+                target_name = self._extract_user_name(session_key)
+                target_id = self._extract_user_id(session_key)
+
+                result = await self.analyzer.analyze_group(
+                    session_id=session_key,
+                    dialogue_text=dialogue_text,
+                    current_values=current_values,
+                    target_name=target_name,
+                    target_id=target_id,
+                    persona_prompt=self._last_persona,
+                )
+
+                if not result:
+                    logger.warning("[RelationSense] 群聊分析失败 session=%s", session_key)
+                    return {"ok": False, "error": "LLM 分析调用失败"}
+
+                new_values, has_changes = self.tracker.apply_analysis_result(
+                    current_values, result, is_initial=is_initial,
+                )
+
+                affection_delta = new_values["affection"] - current_values["affection"]
+                self._last_affection_change[session_key] = affection_delta
+
+                level = self.tracker.compute_level(
+                    new_values["affection"], new_values["trust"], new_values["depth"],
+                )
+
+                summary = result.get("summary", state.get("summary", ""))
+                user_state = result.get("user_state", "")
+                tone_hint = result.get("tone_hint", "")
+                confidence = result.get("confidence", 0.0)
+
+                await self.db.set_meta_value(f"user_state_{session_key}", user_state)
+                await self.db.set_meta_value(f"tone_hint_{session_key}", tone_hint)
+
+                await self.db.upsert_relation_state(
+                    session_id=session_key,
+                    persona_name=state.get("persona_name", ""),
+                    affection=new_values["affection"],
+                    trust=new_values["trust"],
+                    depth=new_values["depth"],
+                    dependence=new_values["dependence"],
+                    return_rate=new_values["return_rate"],
+                    relation_level=level,
+                    summary=summary,
+                )
+
+                new_vals_json = json.dumps(new_values, ensure_ascii=False)
+
+                await self.db.add_analysis_log(
+                    session_id=session_key,
+                    persona_name=state.get("persona_name", ""),
+                    raw_json=json.dumps(result, ensure_ascii=False),
+                    old_values=old_vals_json,
+                    new_values=new_vals_json,
+                    summary=summary,
+                    confidence=confidence,
+                    trigger=trigger,
+                    source="group_analysis",
+                )
+
+                await self.db.reset_msg_count(session_key)
+
+                platform, group_id, user_id = self._parse_group_user_key(session_key)
+                if platform and group_id and user_id:
+                    await self.db.mark_user_analyzed(platform, group_id, user_id)
+
+                debug_mode = self._cfg("debug_mode", False)
+                if debug_mode or has_changes:
+                    logger.info(
+                        "[RelationSense] 群聊分析完成 会话=%s 触发=%s "
+                        "好感度=%.1f→%.1f 信任度=%.1f→%.1f 等级=%s",
+                        session_key, trigger,
+                        current_values["affection"], new_values["affection"],
+                        current_values["trust"], new_values["trust"],
+                        level,
+                    )
+
+                return {
+                    "ok": True, "level": level,
+                    "level_label": self.tracker.compute_label(level),
+                    "summary": summary, "user_state": user_state,
+                    "tone_hint": tone_hint, "has_changes": has_changes,
+                    "is_initial": is_initial,
+                    "changes": {
+                        dim: (current_values[dim], new_values[dim])
+                        for dim in ("affection", "trust", "depth", "dependence", "return_rate")
+                    },
+                }
+
+            except Exception as e:
+                logger.error(
+                    "[RelationSense] 群聊分析异常 session=%s: %s",
+                    session_key, e, exc_info=True,
+                )
+                return {"ok": False, "error": f"分析异常: {e}"}
+
+    async def _group_batch_analysis_loop(self):
+        while True:
+            try:
+                interval = int(self._cfg("group_analysis_interval_minutes", 120))
+                await asyncio.sleep(interval * 60)
+
+                if not self._cfg("enable_group_mode", False):
+                    continue
+
+                active_days = int(self._cfg("group_active_days", 3))
+                max_users = int(self._cfg("group_max_active_users", 20))
+
+                group_keys = set()
+                for session_key in list(self._last_activity.keys()):
+                    gk = self._extract_group_key(session_key)
+                    if gk:
+                        group_keys.add(gk)
+
+                for group_key in group_keys:
+                    try:
+                        parts = group_key.split("_", 1)
+                        if len(parts) != 2:
+                            continue
+                        platform, group_id = parts
+
+                        await self.db.clean_inactive_users(platform, group_id, active_days)
+
+                        stale_users = await self.db.get_stale_active_users(
+                            platform, group_id,
+                            stale_hours=2.0, min_msgs=10, limit=5,
+                        )
+
+                        if not stale_users:
+                            continue
+
+                        dialogue_text = await self._get_group_dialogue(group_key)
+                        if not dialogue_text:
+                            continue
+
+                        batch_result = await self.analyzer.analyze_group_batch(
+                            dialogue_text=dialogue_text,
+                            target_users=stale_users,
+                            persona_prompt=self._last_persona,
+                        )
+
+                        if not batch_result:
+                            logger.warning(
+                                "[RelationSense] 群聊批量分析失败 group=%s", group_key
+                            )
+                            continue
+
+                        for user_result in batch_result:
+                            if not isinstance(user_result, dict):
+                                continue
+                            user_id = str(user_result.get("user_id", ""))
+                            if not user_id:
+                                continue
+
+                            if self._cfg("unify_cross_session", False):
+                                session_key = f"user_{platform}_{user_id}"
+                            else:
+                                session_key = f"{platform}_{group_id}_{user_id}"
+
+                            state = await self.db.get_relation_state_safe(session_key)
+                            is_initial = state is None
+                            if is_initial:
+                                current_values = {
+                                    "affection": 50.0, "trust": 30.0, "depth": 20.0,
+                                    "dependence": 10.0, "return_rate": 0.0,
+                                }
+                            else:
+                                current_values = {
+                                    "affection": state.get("affection", 50),
+                                    "trust": state.get("trust", 30),
+                                    "depth": state.get("depth", 20),
+                                    "dependence": state.get("dependence", 10),
+                                    "return_rate": state.get("return_rate", 0),
+                                }
+
+                            new_values, has_changes = self.tracker.apply_analysis_result(
+                                current_values, user_result, is_initial=is_initial,
+                            )
+
+                            level = self.tracker.compute_level(
+                                new_values["affection"], new_values["trust"],
+                                new_values["depth"],
+                            )
+
+                            summary = user_result.get("summary", "")
+                            user_state = user_result.get("user_state", "")
+                            tone_hint = user_result.get("tone_hint", "")
+
+                            await self.db.set_meta_value(f"user_state_{session_key}", user_state)
+                            await self.db.set_meta_value(f"tone_hint_{session_key}", tone_hint)
+
+                            await self.db.upsert_relation_state(
+                                session_id=session_key,
+                                affection=new_values["affection"],
+                                trust=new_values["trust"],
+                                depth=new_values["depth"],
+                                dependence=new_values["dependence"],
+                                return_rate=new_values["return_rate"],
+                                relation_level=level,
+                                summary=summary,
+                            )
+
+                            await self.db.mark_user_analyzed(platform, group_id, user_id)
+
+                            logger.info(
+                                "[RelationSense] 批量分析更新 用户=%s 群=%s 等级=%s",
+                                user_id, group_key, level,
+                            )
+
+                    except Exception as e:
+                        logger.warning(
+                            "[RelationSense] 群聊批量分析异常 group=%s: %s",
+                            group_key, e,
+                        )
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning("[RelationSense] 群聊批量分析循环异常: %s", e)
+
+    # ========== 群聊辅助方法 ==========
+
+    def _extract_group_key(self, session_key: str) -> str:
+        if session_key.startswith("user_"):
+            return ""
+        parts = session_key.split("_")
+        if len(parts) >= 3:
+            return f"{parts[0]}_{parts[1]}"
+        return ""
+
+    def _extract_user_id(self, session_key: str) -> str:
+        if session_key.startswith("user_"):
+            parts = session_key.split("_", 2)
+            return parts[2] if len(parts) >= 3 else ""
+        parts = session_key.split("_")
+        return parts[2] if len(parts) >= 3 else ""
+
+    def _extract_user_name(self, session_key: str) -> str:
+        return session_key
+
+    def _parse_group_user_key(self, session_key: str) -> tuple[str, str, str]:
+        if session_key.startswith("user_"):
+            parts = session_key.split("_", 2)
+            if len(parts) >= 3:
+                return parts[1], "", parts[2]
+            return "", "", ""
+        parts = session_key.split("_")
+        if len(parts) >= 3:
+            return parts[0], parts[1], parts[2]
+        return "", "", ""
+
+    async def _get_group_dialogue(self, group_key: str, count: int = 80) -> str:
+        gcp = self.context.get_registered_star("chat_plus")
+        if gcp and hasattr(gcp, "message_cache_manager"):
+            try:
+                cache_mgr = gcp.message_cache_manager
+                cached = cache_mgr.get_cached_messages(group_key, exclude_current=False)
+                if cached:
+                    lines = []
+                    for msg in cached:
+                        role = msg.get("role", "user")
+                        content = msg.get("content", "")
+                        if not content or not content.strip():
+                            continue
+                        if role == "assistant":
+                            lines.append(f"你: {content.strip()}")
+                        else:
+                            name = msg.get("sender_name") or msg.get("sender_id") or "用户"
+                            lines.append(f"{name}: {content.strip()}")
+                    if lines:
+                        return "\n".join(lines)
+            except Exception:
+                pass
+
+        return self.buffer.format_group_dialogue(group_key, count)
+
+    async def _build_active_users_summary(self, group_key: str, exclude_user_id: str) -> str:
+        parts = group_key.split("_", 1)
+        if len(parts) != 2:
+            return ""
+        platform, group_id = parts
+        active_days = int(self._cfg("group_active_days", 3))
+        active_users = await self.db.get_group_active_users(platform, group_id, active_days)
+
+        summaries = []
+        for user in active_users:
+            uid = user.get("user_id", "")
+            if uid == exclude_user_id:
+                continue
+            if len(summaries) >= 3:
+                break
+            name = user.get("user_name") or uid or "某人"
+            user_session = f"{platform}_{group_id}_{uid}"
+            if self._cfg("unify_cross_session", False):
+                user_session = f"user_{platform}_{uid}"
+            state = await self.db.get_relation_state_safe(user_session)
+            if state and state.get("summary"):
+                summaries.append(f"{name}：{state['summary']}")
+            else:
+                level_label = "初识"
+                if state:
+                    level = state.get("relation_level", "")
+                    if level:
+                        level_label = self.tracker.compute_label(level)
+                summaries.append(f"{name}（{level_label}）")
+
+        return "；".join(summaries)
+
     # ========== system_prompt 注入 ==========
 
     @filter.on_llm_request()
@@ -331,7 +731,12 @@ class RelationSensePlugin(Star):
             return
 
         try:
-            session_id = event.unified_msg_origin
+            session_id, is_group = self._resolve_session_key(event)
+
+            if is_group and self._cfg("enable_group_mode", False):
+                await self._inject_group_context(event, req, session_id)
+                return
+
             state = await self.db.get_relation_state_safe(session_id)
             if state is None:
                 return
@@ -396,6 +801,59 @@ class RelationSensePlugin(Star):
 
         except Exception as e:
             logger.debug("[RelationSense] 注入失败: %s", e)
+
+    async def _inject_group_context(self, event: AstrMessageEvent, req: ProviderRequest, session_key: str):
+        state = await self.db.get_relation_state_safe(session_key)
+        if state is None:
+            return
+
+        try:
+            user_state_meta = await self.db.get_meta_value(f"user_state_{session_key}", "")
+            tone_hint_meta = await self.db.get_meta_value(f"tone_hint_{session_key}", "")
+            state["user_state"] = user_state_meta or state.get("summary", "")
+            state["tone_hint"] = tone_hint_meta or "保持自然语气回应"
+        except Exception:
+            state["user_state"] = state.get("summary", "")
+            state["tone_hint"] = "保持自然语气回应"
+
+        if not state.get("user_state"):
+            state["user_state"] = ""
+
+        sender_name = getattr(event, "get_sender_name", lambda: "")() or "用户"
+        sender_id = event.get_sender_id() or ""
+
+        group_key = self._extract_group_key(session_key)
+        active_users_summary = ""
+        if group_key:
+            active_users_summary = await self._build_active_users_summary(group_key, sender_id)
+
+        scenario = self._determine_scenario(session_key, state)
+
+        injection = self.injector.build_group_injection(
+            state,
+            sender_name=sender_name,
+            active_users_summary=active_users_summary,
+            scenario=scenario,
+        )
+
+        if not injection:
+            return
+
+        if getattr(req, "system_prompt", None) is None:
+            req.system_prompt = ""
+
+        req.system_prompt, removed = _remove_rs_injection(req.system_prompt)
+        if removed:
+            logger.debug("[RelationSense] 已清理上次群聊注入: session=%s", session_key)
+
+        req.system_prompt += "\n" + RS_INJECTION_HEADER + "\n" + injection + "\n" + RS_INJECTION_FOOTER
+
+        debug_mode = self._cfg("debug_mode", False)
+        if debug_mode:
+            logger.info(
+                "[RelationSense] 已注入群聊关系上下文 会话=%s 说话者=%s 好感度=%.1f\n===== 注入内容 =====\n%s\n==================",
+                session_key, sender_name, state.get("affection", 0), injection.strip(),
+            )
 
     @filter.on_llm_response()
     async def on_llm_response_parse_update(self, event: AstrMessageEvent, resp):

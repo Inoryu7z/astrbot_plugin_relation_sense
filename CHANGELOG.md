@@ -1,3 +1,20 @@
+### v1.4.0
+
+**👥 群聊模式：1vN 关系感知**
+
+* 新增 `enable_group_mode` 全局开关，开启后群聊场景自动切换到多用户关系感知逻辑，私聊行为完全不变
+* 新增 `unify_cross_session` 可选开关，开启后同一用户在所有会话共享五维数据
+* 新增 `group_active_days`、`group_analysis_interval_minutes`、`group_max_active_users` 群聊配置项
+* 群聊中按 `platform_groupId_userId` 格式为每个用户维护独立的关系状态
+* 新增群聊专用分析提示词（GROUP_ANALYZER_SYSTEM_PROMPT / GROUP_ANALYZER_USER_PROMPT），针对群聊场景调整五维评估规则
+* 新增群聊批量分析提示词（GROUP_BATCH_ANALYZER），单次 LLM 调用分析多用户
+* 新增群聊专用注入模板（GROUP_INJECTION_*），包含当前说话者上下文 + 活跃用户摘要
+* 新增 `group_user_activity` 数据库表，追踪群内用户活跃度和分析时间
+* 消息缓存扩展：`add_message` 新增 `sender_id`/`sender_name`/`is_at_bot` 参数
+* 新增 `format_group_dialogue` 方法，将缓存消息格式化为带发送者名称的对话文本
+* 优先复用 group_chat_plus 的消息缓存，不可用时回退自有缓存
+* 异步后台批量补分析循环，定期检查过期活跃用户并批量更新
+
 ### v1.3.0
 
 **🏗️ 三层架构重构：防注入累积 + 实时感知 + 自主修正**
