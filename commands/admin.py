@@ -60,62 +60,6 @@ class RelationAdminCommands:
             )
         return "\n".join(lines)
 
-    async def unfreeze_all(self, session_id: str) -> str:
-        """解冻所有维度。
-
-        实际上冻结是由 tracker 在阈值判断时决定的，无法从 DB 层面"解冻"，
-        因为好感/信任只要超阈值就会再次被冻结。
-        此命令通过将好感/信任降到略低于阈值来实现"解冻"效果。
-        """
-        db = self.plugin.db
-        state = await db.get_relation_state_safe(session_id)
-        if state is None:
-            return "该会话暂无关系数据。"
-
-        affection_threshold = float(
-            self.plugin.config.get("affection_freeze_threshold", 90.0)
-        )
-        trust_threshold = float(
-            self.plugin.config.get("trust_freeze_threshold", 88.0)
-        )
-
-        affection = state.get("affection", 50)
-        trust = state.get("trust", 30)
-        updated = False
-
-        if affection >= affection_threshold:
-            affection = affection_threshold - 1.0
-            updated = True
-        if trust >= trust_threshold:
-            trust = trust_threshold - 1.0
-            updated = True
-
-        if not updated:
-            return "所有维度均未冻结，无需解冻。"
-
-        await db.upsert_relation_state(
-            session_id=session_id,
-            persona_name=state.get("persona_name", ""),
-            affection=affection,
-            trust=trust,
-            depth=state.get("depth", 20),
-            dependence=state.get("dependence", 10),
-            return_rate=state.get("return_rate", 0),
-            relation_level=state.get("relation_level", ""),
-            summary=state.get("summary", ""),
-        )
-
-        logger.info(
-            "[RelationSense] 已解冻 会话=%s 好感度=%.1f→%.1f 信任度=%.1f→%.1f",
-            session_id, state["affection"], affection, state["trust"], trust,
-        )
-
-        return (
-            f"已解冻！\n"
-            f"好感度: {state['affection']:.1f} → {affection:.1f}\n"
-            f"信任度: {state['trust']:.1f} → {trust:.1f}"
-        )
-
     async def reset(self, session_id: str) -> str:
         """重置关系数据。"""
         db = self.plugin.db

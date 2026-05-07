@@ -41,7 +41,7 @@ def _remove_rs_injection(system_prompt):
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.4.0",
+    "1.5.0",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -66,7 +66,6 @@ class RelationSensePlugin(Star):
         self._analysis_locks: dict[str, asyncio.Lock] = {}
         self._last_persona: str = ""
         self._last_affection_change: dict[str, float] = {}
-        self._just_returned: set[str] = set()
         self._last_activity: dict[str, float] = {}
         self._scenario_flags: dict[str, str] = {}
         self._live_user_state: dict[str, str] = {}
@@ -162,21 +161,6 @@ class RelationSensePlugin(Star):
                 await self.db.increment_msg_count(session_id)
 
                 self._last_request_session[event.unified_msg_origin] = (session_id, is_group)
-
-                event_type_keyword = self.trigger.detect_event_trigger(message_str)
-                if event_type_keyword:
-                    event_type, keyword = event_type_keyword
-                    logger.info(
-                        "[RelationSense] 检测到关键事件，触发分析 会话=%s 类型=%s 关键词=%s",
-                        session_id, event_type, keyword,
-                    )
-                    if event_type == "return":
-                        self._just_returned.add(session_id)
-
-                    if is_group and self._cfg("enable_group_mode", False):
-                        self._spawn_bg(self._do_group_analyze(session_id, trigger="event"))
-                    else:
-                        self._spawn_bg(self._do_analyze(session_id, trigger="event"))
         except Exception as e:
             logger.debug("[RelationSense] 用户消息缓存失败: %s", e)
 
@@ -949,13 +933,6 @@ class RelationSensePlugin(Star):
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("解冻关系", alias={"relation_unfreeze"})
-    async def cmd_relation_unfreeze(self, event: AstrMessageEvent):
-        session_id, _ = self._resolve_session_key(event)
-        result = await self.admin.unfreeze_all(session_id)
-        yield event.plain_result(result)
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("重置关系", alias={"relation_reset"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
         session_id, _ = self._resolve_session_key(event)
@@ -998,29 +975,18 @@ class RelationSensePlugin(Star):
         """根据当前状态判定注入场景策略。"""
         affection = state.get("affection", 0)
         trust = state.get("trust", 0)
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
 
-        # 好感信任双满 → 极简
-        if affection >= affection_threshold and trust >= trust_threshold:
+        if affection >= 90 and trust >= 88:
             return "minimal"
 
-        # 刚从回归事件中回来
-        if session_id in self._just_returned:
-            self._just_returned.discard(session_id)
-            return "return"
-
-        # 好感度明显下降（≥ 5）→ 冲突
         last_change = self._last_affection_change.get(session_id, 0)
         if last_change <= -5:
             self._last_affection_change[session_id] = 0
             return "conflict"
 
-        # 好感 60-75 且信任 < 70 → 暧昧
         if 60 <= affection <= 75 and trust < 70:
             return "ambiguous"
 
-        # 长时间无活跃 → 沉寂
         now = time.time()
         last_active = self._last_activity.get(session_id, now)
         if now - last_active > COOLING_INACTIVITY_HOURS * 3600 * 0.5:
@@ -1029,7 +995,6 @@ class RelationSensePlugin(Star):
             if depth < 40 and dependence < 40:
                 return "silence"
 
-        # 由确定的场景覆盖
         if session_id in self._scenario_flags:
             flag = self._scenario_flags.pop(session_id)
             return flag
@@ -1088,14 +1053,6 @@ class RelationSensePlugin(Star):
     async def _cleanup_loop(self):
         while True:
             try:
-                retention = int(self._cfg("history_retention_days", 60))
-                deleted = await self.db.clean_expired(retention)
-                if deleted > 0:
-                    logger.info(
-                        "[RelationSense] 清理了 %d 条过期分析记录（保留 %d 天）",
-                        deleted, retention,
-                    )
-
                 now = time.time()
                 stale_cutoff = now - self._MEMORY_CLEANUP_THRESHOLD
                 stale_sessions = [
@@ -1105,7 +1062,6 @@ class RelationSensePlugin(Star):
                 for sid in stale_sessions:
                     self._analysis_locks.pop(sid, None)
                     self._last_affection_change.pop(sid, None)
-                    self._just_returned.discard(sid)
                     self._last_activity.pop(sid, None)
                     self._scenario_flags.pop(sid, None)
                     self._live_user_state.pop(sid, None)

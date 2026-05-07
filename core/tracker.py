@@ -47,21 +47,6 @@ class DimensionTracker:
                 return label
         return "未知"
 
-    def is_dimension_frozen(self, dim_name: str, score: float) -> bool:
-        """判断某维度是否达到冻结阈值。
-
-        Args:
-            dim_name: 'affection' 或 'trust'
-            score: 当前数值
-        """
-        if dim_name == "affection":
-            threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-            return score >= threshold
-        if dim_name == "trust":
-            threshold = float(self._cfg("trust_freeze_threshold", 88.0))
-            return score >= threshold
-        return False
-
     def apply_analysis_result(
         self,
         current_values: dict,
@@ -83,17 +68,6 @@ class DimensionTracker:
         for dim in DIMENSION_KEYS:
             dim_data = analysis_result.get(dim, {})
             if not isinstance(dim_data, dict):
-                continue
-
-            frozen = dim_data.get("frozen", False)
-            if frozen:
-                logger.debug("[RelationSense] 维度 %s 已冻结，跳过更新", dim)
-                continue
-
-            if dim in ("affection", "trust") and self.is_dimension_frozen(
-                dim, current_values.get(dim, 0)
-            ):
-                logger.debug("[RelationSense] 维度 %s 已达本地冻结阈值，跳过更新", dim)
                 continue
 
             new_score = dim_data.get("score")

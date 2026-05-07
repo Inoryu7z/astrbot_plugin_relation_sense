@@ -355,20 +355,6 @@ class RelationDatabase:
     async def increment_msg_count(self, session_id: str):
         return await self._execute(self._sync_increment_msg_count, session_id)
 
-    # ========== 数据清理 ==========
-
-    def _sync_clean_expired(self, days_limit: int):
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cutoff_date = (datetime.now() - timedelta(days=days_limit)).strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute("DELETE FROM analysis_log WHERE created_at < ?", (cutoff_date,))
-            deleted = cursor.rowcount
-            conn.commit()
-            return deleted
-
-    async def clean_expired(self, days_limit: int):
-        return await self._execute(self._sync_clean_expired, days_limit)
-
     # ========== 群聊活跃用户 ==========
 
     def _sync_touch_user_activity(

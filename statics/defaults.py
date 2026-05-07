@@ -7,17 +7,12 @@ class PluginConfig:
 
     analysis_interval_minutes: int = 30
     min_new_messages: int = 15
-    enable_event_trigger: bool = True
-
-    affection_freeze_threshold: float = 90.0
-    trust_freeze_threshold: float = 88.0
 
     analysis_provider_id: str = ""
     analysis_secondary_provider_id: str = ""
     analysis_llm_name: str = ""
     analysis_timeout_seconds: float = 60.0
 
-    history_retention_days: int = 60
     buffer_max_size: int = 100
 
     debug_mode: bool = False
@@ -35,14 +30,10 @@ class PluginConfig:
             "enable_injection": self.enable_injection,
             "analysis_interval_minutes": self.analysis_interval_minutes,
             "min_new_messages": self.min_new_messages,
-            "enable_event_trigger": self.enable_event_trigger,
-            "affection_freeze_threshold": self.affection_freeze_threshold,
-            "trust_freeze_threshold": self.trust_freeze_threshold,
             "analysis_provider_id": self.analysis_provider_id,
             "analysis_secondary_provider_id": self.analysis_secondary_provider_id,
             "analysis_llm_name": self.analysis_llm_name,
             "analysis_timeout_seconds": self.analysis_timeout_seconds,
-            "history_retention_days": self.history_retention_days,
             "buffer_max_size": self.buffer_max_size,
             "debug_mode": self.debug_mode,
             "enable_live_perception": self.enable_live_perception,
@@ -60,14 +51,10 @@ class PluginConfig:
             enable_injection=data.get("enable_injection", True),
             analysis_interval_minutes=data.get("analysis_interval_minutes", 30),
             min_new_messages=data.get("min_new_messages", 15),
-            enable_event_trigger=data.get("enable_event_trigger", True),
-            affection_freeze_threshold=data.get("affection_freeze_threshold", 90.0),
-            trust_freeze_threshold=data.get("trust_freeze_threshold", 88.0),
             analysis_provider_id=data.get("analysis_provider_id", ""),
             analysis_secondary_provider_id=data.get("analysis_secondary_provider_id", ""),
             analysis_llm_name=data.get("analysis_llm_name", ""),
             analysis_timeout_seconds=data.get("analysis_timeout_seconds", 60.0),
-            history_retention_days=data.get("history_retention_days", 60),
             buffer_max_size=data.get("buffer_max_size", 100),
             debug_mode=data.get("debug_mode", False),
             enable_live_perception=data.get("enable_live_perception", False),

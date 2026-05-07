@@ -37,30 +37,6 @@
     "default": 15,
     "hint": "新增消息数达到此值才可能触发分析。"
   },
-  "enable_event_trigger": {
-    "description": "事件触发",
-    "type": "bool",
-    "default": true,
-    "hint": "检测到冲突/分享秘密/回归等关键事件时立即触发分析。"
-  },
-  "affection_freeze_threshold": {
-    "description": "好感度冻结线",
-    "type": "int",
-    "default": 90,
-    "hint": "好感度达到此值后冻结，不再变化。可通过命令解冻。"
-  },
-  "trust_freeze_threshold": {
-    "description": "信任度冻结线",
-    "type": "int",
-    "default": 88,
-    "hint": "信任度达到此值后冻结，不再变化。可通过命令解冻。"
-  },
-  "history_retention_days": {
-    "description": "记录保留（天）",
-    "type": "int",
-    "default": 60,
-    "hint": "分析记录保留天数，超过自动清理。"
-  },
   "buffer_max_size": {
     "description": "消息缓存上限",
     "type": "int",

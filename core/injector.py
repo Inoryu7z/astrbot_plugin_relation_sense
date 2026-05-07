@@ -5,13 +5,11 @@ from ..statics.prompts import (
     INJECTION_CONFLICT,
     INJECTION_MINIMAL,
     INJECTION_NORMAL,
-    INJECTION_RETURN,
     INJECTION_SILENCE,
     GROUP_INJECTION_AMBIGUOUS,
     GROUP_INJECTION_CONFLICT,
     GROUP_INJECTION_MINIMAL,
     GROUP_INJECTION_NORMAL,
-    GROUP_INJECTION_RETURN,
     GROUP_INJECTION_SILENCE,
 )
 
@@ -36,7 +34,6 @@ class RelationInjector:
                 - "minimal": 好感信任双满
                 - "conflict": 刚发生冲突
                 - "ambiguous": 好感在 60-75 暧昧区间
-                - "return": 用户刚回来
                 - "silence": 用户话很少/敷衍
                 - "normal": 默认
 
@@ -48,14 +45,10 @@ class RelationInjector:
 
         affection = state.get("affection", 0)
         trust = state.get("trust", 0)
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
         summary = state.get("summary", "")
         user_state = state.get("user_state", "")
 
-        if scenario == "minimal" or (
-            affection >= affection_threshold and trust >= trust_threshold
-        ):
+        if scenario == "minimal" or (affection >= 90 and trust >= 88):
             user_state_text = summary or user_state
             return INJECTION_MINIMAL.format(
                 user_state=user_state_text if user_state_text else "对方今天主动找你聊天。"
@@ -68,11 +61,6 @@ class RelationInjector:
 
         if scenario == "ambiguous":
             return INJECTION_AMBIGUOUS.format(
-                user_state=user_state or summary or ""
-            )
-
-        if scenario == "return":
-            return INJECTION_RETURN.format(
                 user_state=user_state or summary or ""
             )
 
@@ -119,8 +107,6 @@ class RelationInjector:
 
         affection = state.get("affection", 0)
         trust = state.get("trust", 0)
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
         user_state = state.get("user_state", "")
         tone_hint = state.get("tone_hint", "")
 
@@ -131,9 +117,7 @@ class RelationInjector:
             "active_users_summary": active_users_summary or "无",
         }
 
-        if scenario == "minimal" or (
-            affection >= affection_threshold and trust >= trust_threshold
-        ):
+        if scenario == "minimal" or (affection >= 90 and trust >= 88):
             return GROUP_INJECTION_MINIMAL.format(**fmt_kwargs)
 
         if scenario == "conflict":
@@ -141,9 +125,6 @@ class RelationInjector:
 
         if scenario == "ambiguous":
             return GROUP_INJECTION_AMBIGUOUS.format(**fmt_kwargs)
-
-        if scenario == "return":
-            return GROUP_INJECTION_RETURN.format(**fmt_kwargs)
 
         if scenario == "silence":
             return GROUP_INJECTION_SILENCE.format(**fmt_kwargs)

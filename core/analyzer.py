@@ -79,13 +79,7 @@ class RelationAnalyzer:
             logger.warning("[RelationSense] 未配置分析模型，跳过分析")
             return None
 
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
-
-        system_prompt = ANALYZER_SYSTEM_PROMPT.format(
-            affection_threshold=affection_threshold,
-            trust_threshold=trust_threshold,
-        )
+        system_prompt = ANALYZER_SYSTEM_PROMPT
 
         if is_initial:
             user_prompt = ANALYZER_USER_PROMPT_INITIAL.format(
@@ -153,13 +147,7 @@ class RelationAnalyzer:
             logger.warning("[RelationSense] 未配置分析模型，跳过回溯分析")
             return None
 
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
-
-        system_prompt = ANALYZER_SYSTEM_PROMPT.format(
-            affection_threshold=affection_threshold,
-            trust_threshold=trust_threshold,
-        )
+        system_prompt = ANALYZER_SYSTEM_PROMPT
 
         user_prompt = BACKFILL_USER_PROMPT.format(
             bot_name=bot_name,
@@ -234,13 +222,7 @@ class RelationAnalyzer:
             logger.warning("[RelationSense] 未配置分析模型，跳过群聊分析")
             return None
 
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
-
-        system_prompt = GROUP_ANALYZER_SYSTEM_PROMPT.format(
-            affection_threshold=affection_threshold,
-            trust_threshold=trust_threshold,
-        )
+        system_prompt = GROUP_ANALYZER_SYSTEM_PROMPT
 
         user_prompt = GROUP_ANALYZER_USER_PROMPT.format(
             target_name=target_name,
@@ -298,13 +280,7 @@ class RelationAnalyzer:
             logger.warning("[RelationSense] 未配置分析模型，跳过群聊批量分析")
             return None
 
-        affection_threshold = float(self._cfg("affection_freeze_threshold", 90.0))
-        trust_threshold = float(self._cfg("trust_freeze_threshold", 88.0))
-
-        system_prompt = GROUP_BATCH_ANALYZER_SYSTEM_PROMPT.format(
-            affection_threshold=affection_threshold,
-            trust_threshold=trust_threshold,
-        )
+        system_prompt = GROUP_BATCH_ANALYZER_SYSTEM_PROMPT
 
         users_list_parts = []
         for u in target_users:
