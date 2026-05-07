@@ -535,3 +535,16 @@ class RelationDatabase:
         return await self._execute(
             self._sync_get_user_last_analyzed_at, platform, group_id, user_id
         )
+
+    def _sync_get_user_name(self, platform: str, group_id: str, user_id: str) -> str:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_name FROM group_user_activity WHERE platform=? AND group_id=? AND user_id=?",
+                (platform, group_id, user_id),
+            )
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else ""
+
+    async def get_user_name(self, platform: str, group_id: str, user_id: str) -> str:
+        return await self._execute(self._sync_get_user_name, platform, group_id, user_id)

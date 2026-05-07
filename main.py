@@ -71,6 +71,7 @@ class RelationSensePlugin(Star):
         self._scenario_flags: dict[str, str] = {}
         self._live_user_state: dict[str, str] = {}
         self._group_user_last_analyzed: dict[str, float] = {}
+        self._last_request_session: dict[str, tuple[str, bool]] = {}
 
         logger.info("[RelationSense] 插件初始化完成")
 
@@ -107,7 +108,7 @@ class RelationSensePlugin(Star):
             if self._cfg("unify_cross_session", False):
                 platform = event.get_platform_name()
                 user_id = event.get_sender_id()
-                return f"user_{platform}_{user_id}", False
+                return f"user::{platform}::{user_id}", False
             return event.unified_msg_origin, False
 
         if not self._cfg("enable_group_mode", False):
@@ -118,9 +119,9 @@ class RelationSensePlugin(Star):
         user_id = event.get_sender_id()
 
         if self._cfg("unify_cross_session", False):
-            return f"user_{platform}_{user_id}", True
+            return f"user::{platform}::{user_id}", True
 
-        return f"{platform}_{group_id}_{user_id}", True
+        return f"{platform}::{group_id}::{user_id}", True
 
     # ========== 消息监听 & 缓存 ==========
 
@@ -151,7 +152,16 @@ class RelationSensePlugin(Star):
                     session_id, "user", message_str,
                     sender_id=sender_id, sender_name=sender_name, is_at_bot=is_at_bot,
                 )
+                if is_group and self._cfg("enable_group_mode", False):
+                    group_key = self._extract_group_key(session_id)
+                    if group_key:
+                        self.buffer.add_message(
+                            group_key, "user", message_str,
+                            sender_id=sender_id, sender_name=sender_name, is_at_bot=is_at_bot,
+                        )
                 await self.db.increment_msg_count(session_id)
+
+                self._last_request_session[event.unified_msg_origin] = (session_id, is_group)
 
                 event_type_keyword = self.trigger.detect_event_trigger(message_str)
                 if event_type_keyword:
@@ -173,10 +183,18 @@ class RelationSensePlugin(Star):
     @filter.on_llm_response()
     async def on_llm_response_cache(self, event: AstrMessageEvent, resp):
         try:
-            session_id, is_group = self._resolve_session_key(event)
+            stored = self._last_request_session.get(event.unified_msg_origin)
+            if stored:
+                session_id, is_group = stored
+            else:
+                session_id, is_group = self._resolve_session_key(event)
             completion = getattr(resp, "completion_text", "") or ""
             if completion.strip():
                 self.buffer.add_message(session_id, "assistant", completion.strip())
+                if is_group and self._cfg("enable_group_mode", False):
+                    group_key = self._extract_group_key(session_id)
+                    if group_key:
+                        self.buffer.add_message(group_key, "assistant", completion.strip())
                 await self.db.increment_msg_count(session_id)
         except Exception as e:
             logger.debug("[RelationSense] Bot 回复缓存失败: %s", e)
@@ -186,7 +204,11 @@ class RelationSensePlugin(Star):
     @filter.on_llm_response()
     async def on_llm_response_trigger(self, event: AstrMessageEvent, resp):
         try:
-            session_id, is_group = self._resolve_session_key(event)
+            stored = self._last_request_session.get(event.unified_msg_origin)
+            if stored:
+                session_id, is_group = stored
+            else:
+                session_id, is_group = self._resolve_session_key(event)
             should = await self.trigger.should_analyze(session_id)
             if should:
                 logger.info(
@@ -374,6 +396,18 @@ class RelationSensePlugin(Star):
     # ========== 群聊分析流程 ==========
 
     async def _do_group_analyze(self, session_key: str, trigger: str = "scheduled") -> dict:
+        platform, group_id, user_id = self._parse_group_user_key(session_key)
+        if platform and group_id and user_id and trigger != "manual":
+            last_ts = self._group_user_last_analyzed.get(session_key, 0)
+            if time.time() - last_ts < 1800:
+                logger.debug("[RelationSense] 群聊用户 %s 30分钟内已分析(内存)，跳过", session_key)
+                return {"ok": False, "error": "该用户近期已分析"}
+            last_analyzed_at = await self.db.get_user_last_analyzed_at(platform, group_id, user_id)
+            if time.time() - last_analyzed_at < 1800:
+                self._group_user_last_analyzed[session_key] = time.time()
+                logger.debug("[RelationSense] 群聊用户 %s 30分钟内已分析(DB)，跳过", session_key)
+                return {"ok": False, "error": "该用户近期已分析"}
+
         lock = self._get_lock(session_key)
         if lock.locked():
             logger.debug("[RelationSense] 群聊分析已在执行 session=%s，跳过", session_key)
@@ -414,7 +448,7 @@ class RelationSensePlugin(Star):
 
                 old_vals_json = json.dumps(current_values, ensure_ascii=False)
 
-                target_name = self._extract_user_name(session_key)
+                target_name = await self._extract_user_name(session_key)
                 target_id = self._extract_user_id(session_key)
 
                 result = await self.analyzer.analyze_group(
@@ -480,6 +514,7 @@ class RelationSensePlugin(Star):
                 platform, group_id, user_id = self._parse_group_user_key(session_key)
                 if platform and group_id and user_id:
                     await self.db.mark_user_analyzed(platform, group_id, user_id)
+                    self._group_user_last_analyzed[session_key] = time.time()
 
                 debug_mode = self._cfg("debug_mode", False)
                 if debug_mode or has_changes:
@@ -531,10 +566,12 @@ class RelationSensePlugin(Star):
 
                 for group_key in group_keys:
                     try:
-                        parts = group_key.split("_", 1)
-                        if len(parts) != 2:
+                        if not group_key.startswith("grp::"):
                             continue
-                        platform, group_id = parts
+                        parts = group_key.split("::")
+                        if len(parts) != 3:
+                            continue
+                        platform, group_id = parts[1], parts[2]
 
                         await self.db.clean_inactive_users(platform, group_id, active_days)
 
@@ -570,9 +607,9 @@ class RelationSensePlugin(Star):
                                 continue
 
                             if self._cfg("unify_cross_session", False):
-                                session_key = f"user_{platform}_{user_id}"
+                                session_key = f"user::{platform}::{user_id}"
                             else:
-                                session_key = f"{platform}_{group_id}_{user_id}"
+                                session_key = f"{platform}::{group_id}::{user_id}"
 
                             state = await self.db.get_relation_state_safe(session_key)
                             is_initial = state is None
@@ -638,64 +675,53 @@ class RelationSensePlugin(Star):
     # ========== 群聊辅助方法 ==========
 
     def _extract_group_key(self, session_key: str) -> str:
-        if session_key.startswith("user_"):
+        if session_key.startswith("user::"):
             return ""
-        parts = session_key.split("_")
+        if session_key.startswith("grp::"):
+            return session_key
+        parts = session_key.split("::")
         if len(parts) >= 3:
-            return f"{parts[0]}_{parts[1]}"
+            return f"grp::{parts[0]}::{parts[1]}"
         return ""
 
     def _extract_user_id(self, session_key: str) -> str:
-        if session_key.startswith("user_"):
-            parts = session_key.split("_", 2)
+        if session_key.startswith("user::"):
+            parts = session_key.split("::", 2)
             return parts[2] if len(parts) >= 3 else ""
-        parts = session_key.split("_")
+        parts = session_key.split("::")
         return parts[2] if len(parts) >= 3 else ""
 
-    def _extract_user_name(self, session_key: str) -> str:
-        return session_key
+    async def _extract_user_name(self, session_key: str) -> str:
+        platform, group_id, user_id = self._parse_group_user_key(session_key)
+        if platform and group_id and user_id:
+            name = await self.db.get_user_name(platform, group_id, user_id)
+            if name:
+                return name
+        return user_id or session_key
 
     def _parse_group_user_key(self, session_key: str) -> tuple[str, str, str]:
-        if session_key.startswith("user_"):
-            parts = session_key.split("_", 2)
+        if session_key.startswith("user::"):
+            parts = session_key.split("::", 2)
             if len(parts) >= 3:
                 return parts[1], "", parts[2]
             return "", "", ""
-        parts = session_key.split("_")
+        if session_key.startswith("grp::"):
+            return "", "", ""
+        parts = session_key.split("::")
         if len(parts) >= 3:
             return parts[0], parts[1], parts[2]
         return "", "", ""
 
     async def _get_group_dialogue(self, group_key: str, count: int = 80) -> str:
-        gcp = self.context.get_registered_star("chat_plus")
-        if gcp and hasattr(gcp, "message_cache_manager"):
-            try:
-                cache_mgr = gcp.message_cache_manager
-                cached = cache_mgr.get_cached_messages(group_key, exclude_current=False)
-                if cached:
-                    lines = []
-                    for msg in cached:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        if not content or not content.strip():
-                            continue
-                        if role == "assistant":
-                            lines.append(f"你: {content.strip()}")
-                        else:
-                            name = msg.get("sender_name") or msg.get("sender_id") or "用户"
-                            lines.append(f"{name}: {content.strip()}")
-                    if lines:
-                        return "\n".join(lines)
-            except Exception:
-                pass
-
         return self.buffer.format_group_dialogue(group_key, count)
 
     async def _build_active_users_summary(self, group_key: str, exclude_user_id: str) -> str:
-        parts = group_key.split("_", 1)
-        if len(parts) != 2:
+        if not group_key.startswith("grp::"):
             return ""
-        platform, group_id = parts
+        parts = group_key.split("::")
+        if len(parts) != 3:
+            return ""
+        platform, group_id = parts[1], parts[2]
         active_days = int(self._cfg("group_active_days", 3))
         active_users = await self.db.get_group_active_users(platform, group_id, active_days)
 
@@ -707,9 +733,9 @@ class RelationSensePlugin(Star):
             if len(summaries) >= 3:
                 break
             name = user.get("user_name") or uid or "某人"
-            user_session = f"{platform}_{group_id}_{uid}"
+            user_session = f"{platform}::{group_id}::{uid}"
             if self._cfg("unify_cross_session", False):
-                user_session = f"user_{platform}_{uid}"
+                user_session = f"user::{platform}::{uid}"
             state = await self.db.get_relation_state_safe(user_session)
             if state and state.get("summary"):
                 summaries.append(f"{name}：{state['summary']}")
@@ -803,6 +829,14 @@ class RelationSensePlugin(Star):
             logger.debug("[RelationSense] 注入失败: %s", e)
 
     async def _inject_group_context(self, event: AstrMessageEvent, req: ProviderRequest, session_key: str):
+        platform, group_id, user_id = self._parse_group_user_key(session_key)
+        if platform and group_id and user_id:
+            last_ts = self._group_user_last_analyzed.get(session_key, 0)
+            if time.time() - last_ts > 1800:
+                last_analyzed_at = await self.db.get_user_last_analyzed_at(platform, group_id, user_id)
+                if time.time() - last_analyzed_at > 1800:
+                    self._spawn_bg(self._do_group_analyze(session_key, trigger="reply"))
+
         state = await self.db.get_relation_state_safe(session_key)
         if state is None:
             return
@@ -863,7 +897,8 @@ class RelationSensePlugin(Star):
             return
 
         try:
-            session_id = event.unified_msg_origin
+            stored = self._last_request_session.get(event.unified_msg_origin)
+            session_id = stored[0] if stored else event.unified_msg_origin
             completion = getattr(resp, "completion_text", "") or ""
             if not completion:
                 return
@@ -898,7 +933,7 @@ class RelationSensePlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("关系状态", alias={"relation_status"})
     async def cmd_relation_status(self, event: AstrMessageEvent):
-        session_id = event.unified_msg_origin
+        session_id, _ = self._resolve_session_key(event)
         result = await self.admin.get_status(session_id)
         yield event.plain_result(result)
 
@@ -909,30 +944,33 @@ class RelationSensePlugin(Star):
             n = int(limit)
         except (ValueError, TypeError):
             n = 5
-        session_id = event.unified_msg_origin
+        session_id, _ = self._resolve_session_key(event)
         result = await self.admin.get_history(session_id, n)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("解冻关系", alias={"relation_unfreeze"})
     async def cmd_relation_unfreeze(self, event: AstrMessageEvent):
-        session_id = event.unified_msg_origin
+        session_id, _ = self._resolve_session_key(event)
         result = await self.admin.unfreeze_all(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("重置关系", alias={"relation_reset"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
-        session_id = event.unified_msg_origin
+        session_id, _ = self._resolve_session_key(event)
         result = await self.admin.reset(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("关系分析", alias={"relation_analyze"})
     async def cmd_relation_analyze(self, event: AstrMessageEvent):
-        session_id = event.unified_msg_origin
+        session_id, is_group = self._resolve_session_key(event)
         yield event.plain_result("正在分析当前会话的关系状态，请稍候…")
-        outcome = await self._do_analyze(session_id, trigger="manual")
+        if is_group and self._cfg("enable_group_mode", False):
+            outcome = await self._do_group_analyze(session_id, trigger="manual")
+        else:
+            outcome = await self._do_analyze(session_id, trigger="manual")
         if not outcome["ok"]:
             yield event.plain_result(f"关系分析失败：{outcome['error']}")
             return
