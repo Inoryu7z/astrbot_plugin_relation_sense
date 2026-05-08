@@ -1,3 +1,32 @@
+### v1.5.2
+
+**🔧 稳定性修复（第二轮审查）**
+
+* 修复群聊批量分析循环未使用 `_apply_analysis_and_save`，导致 `_last_affection_change` 不更新（冲突场景检测失效）和 `reset_msg_count` 不调用（触发条件不准）
+* 修复 `_sync_upsert_relation_state` 的 SELECT+INSERT/UPDATE 竞态条件，改用原子 `INSERT ... ON CONFLICT DO UPDATE`
+* 修复 `_live_user_state` 使用 `unified_msg_origin` 作为 fallback key 导致内存泄漏和清理失效的问题，改为使用 `_resolve_session_key` 解析的 session_id
+* 修复 `_last_request_session` 清理逻辑第二条件在首轮清理后失效的问题，改为检查 session 是否已不在 `_last_activity` 中
+* 新增 `analysis_log` 表定期清理（默认保留 90 天），防止数据库无限膨胀
+* 群聊批量分析新增分析锁检查，跳过正在被实时分析的用户，避免并发写入冲突
+* 群聊批量分析异常处理从组级别改为用户级别，单个用户失败不影响同组其他用户
+
+### v1.5.1
+
+**🔧 稳定性修复与代码清理**
+
+* 修复 SQLite 消息计数并发写入竞态，改为原子 SQL UPDATE（群聊高频场景下不再丢计数）
+* 修复 `_last_request_session` / `_group_user_last_analyzed` / `_analysis_locks` 内存泄漏，`_cleanup_loop` 现在清理所有内存字典
+* 修复 `_analysis_locks` 清理依赖 `_last_activity` 导致群组级锁无法回收的问题，新增独立使用时间戳追踪
+* 修复冷却衰减后重置 `_last_activity` 导致冷却循环永不停歇的问题，改用独立的 `_last_cooled` 字典
+* 修复 `terminate()` 未等待后台任务完成可能导致数据不一致的问题
+* 修复群聊批量分析循环中缺少 `analysis_log` 记录的问题
+* 修复 JSON 解析贪婪正则可能匹配过多的问题，优先尝试括号平衡匹配
+* 提取 `_apply_analysis_and_save` 公共方法，消除私聊/群聊分析流程的重复代码
+* 命令别名改进：`关系状态` 加 `查看关系`、`关系历史` 加 `关系记录`、`重置关系` 改为主命令 `关系重置`、`关系分析` 加 `分析关系`
+* 移除未使用的 `PluginConfig` / `load_config` 死代码和 `analysis_llm_name` 字段
+* 移除未使用的 `RelationInitializer` 类
+* 移除 `models.py` 中未使用的 `from_row` 方法
+
 ### v1.5.0
 
 **🧹 功能精简：移除冻结/事件触发/记录清理**

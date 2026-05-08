@@ -28,6 +28,13 @@ def _parse_json_response(raw_text: str) -> Optional[dict]:
     except json.JSONDecodeError:
         pass
 
+    match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
         try:
@@ -367,6 +374,15 @@ def _parse_json_array_response(raw_text: str) -> Optional[list[dict]]:
             return result
     except json.JSONDecodeError:
         pass
+
+    match = re.search(r"\[[^[\]]*(?:\[[^[\]]*\][^[\]]*)*\]", text)
+    if match:
+        try:
+            result = json.loads(match.group(0))
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
 
     match = re.search(r"\[[\s\S]*\]", text)
     if match:

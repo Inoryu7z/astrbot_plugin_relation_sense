@@ -31,7 +31,7 @@ _RS_INJECTION_PATTERN = re.compile(
 
 def _remove_rs_injection(system_prompt):
     if not system_prompt:
-        return system_prompt or "", False
+        return "", False
     cleaned = _RS_INJECTION_PATTERN.sub("", system_prompt)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, cleaned != system_prompt
@@ -41,7 +41,7 @@ def _remove_rs_injection(system_prompt):
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.5.0",
+    "1.5.2",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -64,6 +64,7 @@ class RelationSensePlugin(Star):
 
         self._bg_tasks: set[asyncio.Task] = set()
         self._analysis_locks: dict[str, asyncio.Lock] = {}
+        self._lock_last_used: dict[str, float] = {}
         self._last_persona: str = ""
         self._last_affection_change: dict[str, float] = {}
         self._last_activity: dict[str, float] = {}
@@ -71,6 +72,7 @@ class RelationSensePlugin(Star):
         self._live_user_state: dict[str, str] = {}
         self._group_user_last_analyzed: dict[str, float] = {}
         self._last_request_session: dict[str, tuple[str, bool]] = {}
+        self._last_cooled: dict[str, float] = {}
 
         logger.info("[RelationSense] 插件初始化完成")
 
@@ -83,9 +85,12 @@ class RelationSensePlugin(Star):
             logger.info("[RelationSense] 群聊模式已启用，批量分析循环已启动")
 
     async def terminate(self):
-        logger.info("[RelationSense] 插件已卸载")
+        logger.info("[RelationSense] 插件卸载中，等待后台任务结束…")
         for task in self._bg_tasks:
             task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        logger.info("[RelationSense] 插件已卸载")
 
     def _cfg(self, key: str, default=None):
         return self.config.get(key, default)
@@ -99,6 +104,7 @@ class RelationSensePlugin(Star):
     def _get_lock(self, session_id: str) -> asyncio.Lock:
         if session_id not in self._analysis_locks:
             self._analysis_locks[session_id] = asyncio.Lock()
+        self._lock_last_used[session_id] = time.time()
         return self._analysis_locks[session_id]
 
     def _resolve_session_key(self, event: AstrMessageEvent) -> tuple[str, bool]:
@@ -208,8 +214,95 @@ class RelationSensePlugin(Star):
 
     # ========== 核心分析流程 ==========
 
+    async def _apply_analysis_and_save(
+        self,
+        session_id: str,
+        state: dict,
+        current_values: dict,
+        result: dict,
+        is_initial: bool,
+        trigger: str,
+        source: str,
+    ) -> dict:
+        new_values, has_changes = self.tracker.apply_analysis_result(
+            current_values, result, is_initial=is_initial,
+        )
+
+        if not has_changes:
+            logger.debug("[RelationSense] 分析结果无变化 session=%s", session_id)
+
+        affection_delta = new_values["affection"] - current_values["affection"]
+        self._last_affection_change[session_id] = affection_delta
+
+        level = self.tracker.compute_level(
+            new_values["affection"], new_values["trust"], new_values["depth"],
+        )
+
+        summary = result.get("summary", state.get("summary", ""))
+        user_state = result.get("user_state", "")
+        tone_hint = result.get("tone_hint", "")
+        confidence = result.get("confidence", 0.0)
+
+        await self.db.set_meta_value(f"user_state_{session_id}", user_state)
+        await self.db.set_meta_value(f"tone_hint_{session_id}", tone_hint)
+
+        await self.db.upsert_relation_state(
+            session_id=session_id,
+            persona_name=state.get("persona_name", ""),
+            affection=new_values["affection"],
+            trust=new_values["trust"],
+            depth=new_values["depth"],
+            dependence=new_values["dependence"],
+            return_rate=new_values["return_rate"],
+            relation_level=level,
+            summary=summary,
+        )
+
+        old_vals_json = json.dumps(current_values, ensure_ascii=False)
+        new_vals_json = json.dumps(new_values, ensure_ascii=False)
+
+        await self.db.add_analysis_log(
+            session_id=session_id,
+            persona_name=state.get("persona_name", ""),
+            raw_json=json.dumps(result, ensure_ascii=False),
+            old_values=old_vals_json,
+            new_values=new_vals_json,
+            summary=summary,
+            confidence=confidence,
+            trigger=trigger,
+            source=source,
+        )
+
+        await self.db.reset_msg_count(session_id)
+
+        debug_mode = self._cfg("debug_mode", False)
+        if debug_mode or has_changes:
+            logger.info(
+                "[RelationSense] 分析完成 会话=%s 触发=%s 来源=%s "
+                "好感度=%.1f→%.1f 信任度=%.1f→%.1f 对话深度=%.1f→%.1f 等级=%s",
+                session_id, trigger, source,
+                current_values["affection"], new_values["affection"],
+                current_values["trust"], new_values["trust"],
+                current_values["depth"], new_values["depth"],
+                level,
+            )
+
+        return {
+            "ok": True,
+            "level": level,
+            "level_label": self.tracker.compute_label(level),
+            "summary": summary,
+            "user_state": user_state,
+            "tone_hint": tone_hint,
+            "has_changes": has_changes,
+            "is_initial": is_initial,
+            "changes": {
+                dim: (current_values[dim], new_values[dim])
+                for dim in ("affection", "trust", "depth", "dependence", "return_rate")
+            },
+        }
+
     async def _do_analyze(self, session_id: str, trigger: str = "scheduled") -> dict:
-        """执行一次异步分析，返回结构化结果。"""
         lock = self._get_lock(session_id)
         if lock.locked():
             logger.debug("[RelationSense] 分析已在执行 session=%s，跳过", session_id)
@@ -228,28 +321,18 @@ class RelationSensePlugin(Star):
                     dialogue_lines.append(f"{role_label}: {msg['content']}")
                 dialogue_text = "\n".join(dialogue_lines)
 
-                # 获取当前状态
                 state = await self.db.get_relation_state_safe(session_id)
                 is_initial = state is None
                 if is_initial:
                     state = {
-                        "affection": 50.0,
-                        "trust": 30.0,
-                        "depth": 20.0,
-                        "dependence": 10.0,
-                        "return_rate": 0.0,
-                        "relation_level": "Lv0",
-                        "summary": "",
+                        "affection": 50.0, "trust": 30.0, "depth": 20.0,
+                        "dependence": 10.0, "return_rate": 0.0,
+                        "relation_level": "Lv0", "summary": "",
                     }
                     await self.db.upsert_relation_state(
-                        session_id=session_id,
-                        affection=50.0,
-                        trust=30.0,
-                        depth=20.0,
-                        dependence=10.0,
-                        return_rate=0.0,
-                        relation_level="Lv0",
-                        summary="",
+                        session_id=session_id, affection=50.0, trust=30.0,
+                        depth=20.0, dependence=10.0, return_rate=0.0,
+                        relation_level="Lv0", summary="",
                     )
 
                 current_values = {
@@ -260,9 +343,6 @@ class RelationSensePlugin(Star):
                     "return_rate": state.get("return_rate", 0),
                 }
 
-                old_vals_json = json.dumps(current_values, ensure_ascii=False)
-
-                # 调用 LLM 分析
                 result = await self.analyzer.analyze(
                     session_id=session_id,
                     dialogue_text=dialogue_text,
@@ -277,98 +357,15 @@ class RelationSensePlugin(Star):
                     logger.warning("[RelationSense] 分析失败 session=%s", session_id)
                     return {"ok": False, "error": "LLM 分析调用失败，请检查分析模型配置"}
 
-                # 应用分析结果
-                new_values, has_changes = self.tracker.apply_analysis_result(
-                    current_values, result, is_initial=is_initial,
-                )
-
-                if not has_changes:
-                    logger.debug("[RelationSense] 分析结果无变化 session=%s", session_id)
-
-                # 记录好感度变化（用于后续冲突检测）
-                affection_delta = new_values["affection"] - current_values["affection"]
-                self._last_affection_change[session_id] = affection_delta
-
-                # 更新等级
-                level = self.tracker.compute_level(
-                    new_values["affection"],
-                    new_values["trust"],
-                    new_values["depth"],
-                )
-
-                # 保存摘要和 user_state/tone_hint
-                summary = result.get("summary", state.get("summary", ""))
-                user_state = result.get("user_state", "")
-                tone_hint = result.get("tone_hint", "")
-                confidence = result.get("confidence", 0.0)
-
-                # 同时也保存 user_state 和 tone_hint 到 DB（扩展字段 → 使用 meta 表）
-                await self.db.set_meta_value(
-                    f"user_state_{session_id}", user_state
-                )
-                await self.db.set_meta_value(
-                    f"tone_hint_{session_id}", tone_hint
-                )
-
-                await self.db.upsert_relation_state(
+                return await self._apply_analysis_and_save(
                     session_id=session_id,
-                    persona_name=state.get("persona_name", ""),
-                    affection=new_values["affection"],
-                    trust=new_values["trust"],
-                    depth=new_values["depth"],
-                    dependence=new_values["dependence"],
-                    return_rate=new_values["return_rate"],
-                    relation_level=level,
-                    summary=summary,
-                )
-
-                new_vals_json = json.dumps(new_values, ensure_ascii=False)
-
-                await self.db.add_analysis_log(
-                    session_id=session_id,
-                    persona_name=state.get("persona_name", ""),
-                    raw_json=json.dumps(result, ensure_ascii=False),
-                    old_values=old_vals_json,
-                    new_values=new_vals_json,
-                    summary=summary,
-                    confidence=confidence,
+                    state=state,
+                    current_values=current_values,
+                    result=result,
+                    is_initial=is_initial,
                     trigger=trigger,
                     source="live_analysis",
                 )
-
-                # 重置消息计数
-                await self.db.reset_msg_count(session_id)
-
-                debug_mode = self._cfg("debug_mode", False)
-                if debug_mode or has_changes:
-                    logger.info(
-                        "[RelationSense] 分析完成 会话=%s 触发=%s "
-                        "好感度=%.1f→%.1f 信任度=%.1f→%.1f 对话深度=%.1f→%.1f 等级=%s",
-                        session_id, trigger,
-                        current_values["affection"], new_values["affection"],
-                        current_values["trust"], new_values["trust"],
-                        current_values["depth"], new_values["depth"],
-                        level,
-                    )
-
-                level_label = self.tracker.compute_label(level)
-                return {
-                    "ok": True,
-                    "level": level,
-                    "level_label": level_label,
-                    "summary": summary,
-                    "user_state": user_state,
-                    "tone_hint": tone_hint,
-                    "changes": {
-                        "affection": (current_values["affection"], new_values["affection"]),
-                        "trust": (current_values["trust"], new_values["trust"]),
-                        "depth": (current_values["depth"], new_values["depth"]),
-                        "dependence": (current_values["dependence"], new_values["dependence"]),
-                        "return_rate": (current_values["return_rate"], new_values["return_rate"]),
-                    },
-                    "is_initial": is_initial,
-                    "has_changes": has_changes,
-                }
 
             except Exception as e:
                 logger.error(
@@ -430,8 +427,6 @@ class RelationSensePlugin(Star):
                     "return_rate": state.get("return_rate", 0),
                 }
 
-                old_vals_json = json.dumps(current_values, ensure_ascii=False)
-
                 target_name = await self._extract_user_name(session_key)
                 target_id = self._extract_user_id(session_key)
 
@@ -448,80 +443,22 @@ class RelationSensePlugin(Star):
                     logger.warning("[RelationSense] 群聊分析失败 session=%s", session_key)
                     return {"ok": False, "error": "LLM 分析调用失败"}
 
-                new_values, has_changes = self.tracker.apply_analysis_result(
-                    current_values, result, is_initial=is_initial,
-                )
-
-                affection_delta = new_values["affection"] - current_values["affection"]
-                self._last_affection_change[session_key] = affection_delta
-
-                level = self.tracker.compute_level(
-                    new_values["affection"], new_values["trust"], new_values["depth"],
-                )
-
-                summary = result.get("summary", state.get("summary", ""))
-                user_state = result.get("user_state", "")
-                tone_hint = result.get("tone_hint", "")
-                confidence = result.get("confidence", 0.0)
-
-                await self.db.set_meta_value(f"user_state_{session_key}", user_state)
-                await self.db.set_meta_value(f"tone_hint_{session_key}", tone_hint)
-
-                await self.db.upsert_relation_state(
+                outcome = await self._apply_analysis_and_save(
                     session_id=session_key,
-                    persona_name=state.get("persona_name", ""),
-                    affection=new_values["affection"],
-                    trust=new_values["trust"],
-                    depth=new_values["depth"],
-                    dependence=new_values["dependence"],
-                    return_rate=new_values["return_rate"],
-                    relation_level=level,
-                    summary=summary,
-                )
-
-                new_vals_json = json.dumps(new_values, ensure_ascii=False)
-
-                await self.db.add_analysis_log(
-                    session_id=session_key,
-                    persona_name=state.get("persona_name", ""),
-                    raw_json=json.dumps(result, ensure_ascii=False),
-                    old_values=old_vals_json,
-                    new_values=new_vals_json,
-                    summary=summary,
-                    confidence=confidence,
+                    state=state,
+                    current_values=current_values,
+                    result=result,
+                    is_initial=is_initial,
                     trigger=trigger,
                     source="group_analysis",
                 )
-
-                await self.db.reset_msg_count(session_key)
 
                 platform, group_id, user_id = self._parse_group_user_key(session_key)
                 if platform and group_id and user_id:
                     await self.db.mark_user_analyzed(platform, group_id, user_id)
                     self._group_user_last_analyzed[session_key] = time.time()
 
-                debug_mode = self._cfg("debug_mode", False)
-                if debug_mode or has_changes:
-                    logger.info(
-                        "[RelationSense] 群聊分析完成 会话=%s 触发=%s "
-                        "好感度=%.1f→%.1f 信任度=%.1f→%.1f 等级=%s",
-                        session_key, trigger,
-                        current_values["affection"], new_values["affection"],
-                        current_values["trust"], new_values["trust"],
-                        level,
-                    )
-
-                return {
-                    "ok": True, "level": level,
-                    "level_label": self.tracker.compute_label(level),
-                    "summary": summary, "user_state": user_state,
-                    "tone_hint": tone_hint, "has_changes": has_changes,
-                    "is_initial": is_initial,
-                    "changes": {
-                        dim: (current_values[dim], new_values[dim])
-                        for dim in ("affection", "trust", "depth", "dependence", "return_rate")
-                    },
-                }
+                return outcome
 
             except Exception as e:
                 logger.error(
@@ -595,14 +532,24 @@ class RelationSensePlugin(Star):
                             else:
                                 session_key = f"{platform}::{group_id}::{user_id}"
 
-                            state = await self.db.get_relation_state_safe(session_key)
-                            is_initial = state is None
-                            if is_initial:
-                                current_values = {
-                                    "affection": 50.0, "trust": 30.0, "depth": 20.0,
-                                    "dependence": 10.0, "return_rate": 0.0,
-                                }
-                            else:
+                            lock = self._get_lock(session_key)
+                            if lock.locked():
+                                logger.debug(
+                                    "[RelationSense] 批量分析跳过已锁定用户 %s",
+                                    session_key,
+                                )
+                                continue
+
+                            try:
+                                state = await self.db.get_relation_state_safe(session_key)
+                                is_initial = state is None
+                                if is_initial:
+                                    state = {
+                                        "affection": 50.0, "trust": 30.0, "depth": 20.0,
+                                        "dependence": 10.0, "return_rate": 0.0,
+                                        "relation_level": "Lv0", "summary": "",
+                                    }
+
                                 current_values = {
                                     "affection": state.get("affection", 50),
                                     "trust": state.get("trust", 30),
@@ -611,39 +558,25 @@ class RelationSensePlugin(Star):
                                     "return_rate": state.get("return_rate", 0),
                                 }
 
-                            new_values, has_changes = self.tracker.apply_analysis_result(
-                                current_values, user_result, is_initial=is_initial,
-                            )
-
-                            level = self.tracker.compute_level(
-                                new_values["affection"], new_values["trust"],
-                                new_values["depth"],
-                            )
-
-                            summary = user_result.get("summary", "")
-                            user_state = user_result.get("user_state", "")
-                            tone_hint = user_result.get("tone_hint", "")
-
-                            await self.db.set_meta_value(f"user_state_{session_key}", user_state)
-                            await self.db.set_meta_value(f"tone_hint_{session_key}", tone_hint)
-
-                            await self.db.upsert_relation_state(
-                                session_id=session_key,
-                                affection=new_values["affection"],
-                                trust=new_values["trust"],
-                                depth=new_values["depth"],
-                                dependence=new_values["dependence"],
-                                return_rate=new_values["return_rate"],
-                                relation_level=level,
-                                summary=summary,
-                            )
-
-                            await self.db.mark_user_analyzed(platform, group_id, user_id)
-
-                            logger.info(
-                                "[RelationSense] 批量分析更新 用户=%s 群=%s 等级=%s",
-                                user_id, group_key, level,
-                            )
+                                outcome = await self._apply_analysis_and_save(
+                                    session_id=session_key,
+                                    state=state,
+                                    current_values=current_values,
+                                    result=user_result,
+                                    is_initial=is_initial,
+                                    trigger="batch",
+                                    source="group_batch_analysis",
+                                )
+                                await self.db.mark_user_analyzed(platform, group_id, user_id)
+                                logger.info(
+                                    "[RelationSense] 批量分析更新 用户=%s 群=%s 等级=%s",
+                                    user_id, group_key, outcome.get("level", "?"),
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "[RelationSense] 群聊批量分析异常 group=%s user=%s: %s",
+                                    group_key, user_id, e,
+                                )
 
                     except Exception as e:
                         logger.warning(
@@ -882,7 +815,10 @@ class RelationSensePlugin(Star):
 
         try:
             stored = self._last_request_session.get(event.unified_msg_origin)
-            session_id = stored[0] if stored else event.unified_msg_origin
+            if stored:
+                session_id = stored[0]
+            else:
+                session_id, _ = self._resolve_session_key(event)
             completion = getattr(resp, "completion_text", "") or ""
             if not completion:
                 return
@@ -915,14 +851,14 @@ class RelationSensePlugin(Star):
     # ========== 管理命令 ==========
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("关系状态", alias={"relation_status"})
+    @filter.command("关系状态", alias={"relation_status", "查看关系"})
     async def cmd_relation_status(self, event: AstrMessageEvent):
         session_id, _ = self._resolve_session_key(event)
         result = await self.admin.get_status(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("关系历史", alias={"relation_history"})
+    @filter.command("关系历史", alias={"relation_history", "关系记录"})
     async def cmd_relation_history(self, event: AstrMessageEvent, limit: str = "5"):
         try:
             n = int(limit)
@@ -933,14 +869,14 @@ class RelationSensePlugin(Star):
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("重置关系", alias={"relation_reset"})
+    @filter.command("关系重置", alias={"relation_reset", "重置关系"})
     async def cmd_relation_reset(self, event: AstrMessageEvent):
         session_id, _ = self._resolve_session_key(event)
         result = await self.admin.reset(session_id)
         yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("关系分析", alias={"relation_analyze"})
+    @filter.command("关系分析", alias={"relation_analyze", "分析关系"})
     async def cmd_relation_analyze(self, event: AstrMessageEvent):
         session_id, is_group = self._resolve_session_key(event)
         yield event.plain_result("正在分析当前会话的关系状态，请稍候…")
@@ -1007,11 +943,14 @@ class RelationSensePlugin(Star):
         """定期检查长时间不活跃的会话，施加自然衰减。"""
         while True:
             try:
-                await asyncio.sleep(1800)  # 每 30 分钟检查一次
+                await asyncio.sleep(1800)
                 now = time.time()
                 threshold = COOLING_INACTIVITY_HOURS * 3600
                 for sid, last_active in list(self._last_activity.items()):
                     if now - last_active < threshold:
+                        continue
+                    last_cooled = self._last_cooled.get(sid, 0)
+                    if now - last_cooled < threshold:
                         continue
                     state = await self.db.get_relation_state_safe(sid)
                     if state is None:
@@ -1036,11 +975,11 @@ class RelationSensePlugin(Star):
                         relation_level=level,
                         summary=state.get("summary", ""),
                     )
+                    self._last_cooled[sid] = now
                     logger.info(
                         "[RelationSense] 冷却衰减 会话=%s 对话深度=%.1f→%.1f 依赖度=%.1f→%.1f",
                         sid, depth, new_depth, dependence, new_dependence,
                     )
-                    self._last_activity[sid] = now  # 移出冷却窗口，下次再衰减
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -1049,6 +988,7 @@ class RelationSensePlugin(Star):
     # ========== 定期清理 ==========
 
     _MEMORY_CLEANUP_THRESHOLD = 3600 * 24 * 7
+    _LOCK_CLEANUP_THRESHOLD = 3600 * 24 * 2
 
     async def _cleanup_loop(self):
         while True:
@@ -1061,16 +1001,50 @@ class RelationSensePlugin(Star):
                 ]
                 for sid in stale_sessions:
                     self._analysis_locks.pop(sid, None)
+                    self._lock_last_used.pop(sid, None)
                     self._last_affection_change.pop(sid, None)
                     self._last_activity.pop(sid, None)
                     self._scenario_flags.pop(sid, None)
                     self._live_user_state.pop(sid, None)
+                    self._group_user_last_analyzed.pop(sid, None)
+                    self._last_cooled.pop(sid, None)
                     self.buffer.clear(sid)
                 if stale_sessions:
                     logger.info(
                         "[RelationSense] 清理了 %d 个过期会话的内存缓存",
                         len(stale_sessions),
                     )
+
+                stale_origins = [
+                    origin for origin, (sid, _) in self._last_request_session.items()
+                    if sid in stale_sessions or sid not in self._last_activity
+                ]
+                for origin in stale_origins:
+                    self._last_request_session.pop(origin, None)
+
+                lock_cutoff = now - self._LOCK_CLEANUP_THRESHOLD
+                stale_locks = [
+                    sid for sid, ts in self._lock_last_used.items()
+                    if ts < lock_cutoff
+                ]
+                for sid in stale_locks:
+                    self._analysis_locks.pop(sid, None)
+                    self._lock_last_used.pop(sid, None)
+                if stale_locks:
+                    logger.info(
+                        "[RelationSense] 清理了 %d 个过期分析锁",
+                        len(stale_locks),
+                    )
+
+                try:
+                    deleted = await self.db.clean_old_analysis_logs(90)
+                    if deleted:
+                        logger.info(
+                            "[RelationSense] 清理了 %d 条过期分析日志",
+                            deleted,
+                        )
+                except Exception as e:
+                    logger.debug("[RelationSense] 分析日志清理失败: %s", e)
             except asyncio.CancelledError:
                 return
             except Exception as e:

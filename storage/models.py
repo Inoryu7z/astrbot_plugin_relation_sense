@@ -32,22 +32,6 @@ class RelationState:
             "updated_at": self.updated_at,
         }
 
-    @classmethod
-    def from_row(cls, row: tuple) -> "RelationState":
-        return cls(
-            session_id=row[1],
-            persona_name=row[2] or "",
-            affection=row[3],
-            trust=row[4],
-            depth=row[5],
-            dependence=row[6],
-            return_rate=row[7],
-            relation_level=row[8] or "",
-            summary=row[9] or "",
-            created_at=row[10] or "",
-            updated_at=row[11] or "",
-        )
-
 
 @dataclass
 class AnalysisLog:

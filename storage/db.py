@@ -135,39 +135,28 @@ class RelationDatabase:
         with self._connect() as conn:
             cursor = conn.cursor()
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             cursor.execute(
-                "SELECT id FROM relation_state WHERE session_id = ?",
-                (session_id,),
+                """INSERT INTO relation_state
+                   (session_id, persona_name, affection, trust, depth,
+                    dependence, return_rate, relation_level, summary,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       persona_name=excluded.persona_name,
+                       affection=excluded.affection,
+                       trust=excluded.trust,
+                       depth=excluded.depth,
+                       dependence=excluded.dependence,
+                       return_rate=excluded.return_rate,
+                       relation_level=excluded.relation_level,
+                       summary=excluded.summary,
+                       updated_at=excluded.updated_at""",
+                (
+                    session_id, persona_name, affection, trust, depth,
+                    dependence, return_rate, relation_level, summary,
+                    now_str, now_str,
+                ),
             )
-            existing = cursor.fetchone()
-
-            if existing:
-                cursor.execute(
-                    """UPDATE relation_state
-                       SET persona_name=?, affection=?, trust=?, depth=?,
-                           dependence=?, return_rate=?, relation_level=?,
-                           summary=?, updated_at=?
-                       WHERE session_id=?""",
-                    (
-                        persona_name, affection, trust, depth,
-                        dependence, return_rate, relation_level,
-                        summary, now_str, session_id,
-                    ),
-                )
-            else:
-                cursor.execute(
-                    """INSERT INTO relation_state
-                       (session_id, persona_name, affection, trust, depth,
-                        dependence, return_rate, relation_level, summary,
-                        created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        session_id, persona_name, affection, trust, depth,
-                        dependence, return_rate, relation_level, summary,
-                        now_str, now_str,
-                    ),
-                )
             conn.commit()
 
     async def upsert_relation_state(
@@ -349,8 +338,16 @@ class RelationDatabase:
 
     def _sync_increment_msg_count(self, session_id: str):
         meta_key = f"msg_count_{session_id}"
-        current = self._sync_get_meta_value(meta_key, 0)
-        self._sync_set_meta_value(meta_key, current + 1)
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                """INSERT INTO plugin_meta (key, value, updated_at)
+                   VALUES (?, '1', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1, updated_at = excluded.updated_at""",
+                (meta_key, now_str),
+            )
+            conn.commit()
 
     async def increment_msg_count(self, session_id: str):
         return await self._execute(self._sync_increment_msg_count, session_id)
@@ -534,3 +531,20 @@ class RelationDatabase:
 
     async def get_user_name(self, platform: str, group_id: str, user_id: str) -> str:
         return await self._execute(self._sync_get_user_name, platform, group_id, user_id)
+
+    def _sync_clean_old_analysis_logs(self, retention_days: int = 90) -> int:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(days=retention_days)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            cursor.execute(
+                "DELETE FROM analysis_log WHERE created_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
+    async def clean_old_analysis_logs(self, retention_days: int = 90) -> int:
+        return await self._execute(self._sync_clean_old_analysis_logs, retention_days)
