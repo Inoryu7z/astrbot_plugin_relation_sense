@@ -61,6 +61,12 @@
     "default": false,
     "hint": "需要先开启「对话模型自主感知」。允许 LLM 在发现感知过时时通过 <update> 标签修正。"
   },
+  "enable_dialogue_static_update": {
+    "description": "对话模型驱动静态注入",
+    "type": "bool",
+    "default": false,
+    "hint": "需要先开启「对话模型自主感知」。开启后所有静态注入内容（氛围、语气、对方状态）始终由对话模型的 <rs> 标签驱动，后台模型只负责五维数值更新。关闭时仅初始化阶段由对话模型驱动，后续由后台模型接管。"
+  },
   "enable_group_mode": {
     "description": "群聊模式",
     "type": "bool",

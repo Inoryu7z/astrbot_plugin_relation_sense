@@ -322,6 +322,26 @@ class RelationDatabase:
     async def set_meta_value(self, key: str, value: Any):
         return await self._execute(self._sync_set_meta_value, key, value)
 
+    def _sync_delete_meta_value(self, key: str):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM plugin_meta WHERE key = ?", (key,))
+            conn.commit()
+
+    async def delete_meta_value(self, key: str):
+        return await self._execute(self._sync_delete_meta_value, key)
+
+    def _sync_delete_meta_by_prefix(self, prefix: str):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM plugin_meta WHERE key LIKE ?", (f"{prefix}%",))
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
+    async def delete_meta_by_prefix(self, prefix: str):
+        return await self._execute(self._sync_delete_meta_by_prefix, prefix)
+
     def _sync_get_msg_count_since_last(self, session_id: str) -> int:
         meta_key = f"msg_count_{session_id}"
         return self._sync_get_meta_value(meta_key, 0)

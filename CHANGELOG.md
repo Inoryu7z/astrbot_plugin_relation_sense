@@ -1,3 +1,27 @@
+### v1.6.0
+
+**🧠 对话模型关系感知（<rs> 标签机制）+ 审查修复**
+
+* 新增 `<rs>` 标签机制：对话模型可通过 `<rs>` 标签输出关系感知（氛围、语气、对方状态），插件解析后存入 DB 并用于下次注入
+* 新增 `enable_dialogue_static_update` 配置项：开启后静态注入内容（氛围、语气、对方状态）始终由对话模型的 `<rs>` 标签驱动，后台模型只负责五维数值更新；关闭时仅初始化阶段由对话模型驱动，后续由后台模型接管
+* 新增群聊 `<rs>` 驱动注入模板（`GROUP_INJECTION_RS_DIRECT`），群聊场景下对话模型的氛围感知不再被丢弃
+* 新增 `delete_meta_value` / `delete_meta_by_prefix` 数据库方法，支持元数据按键删除
+* 修改实时感知提示词：追加关系氛围评估和 `<rs>` 标签输出指令，明确人设定义了关系起点而非"初次见面"
+* 修改注入逻辑：当 `<rs>` 内容可用时，使用对话模型的感知替代推导的氛围/语气/对方状态；`rs_driven` 模式下跳过场景模板（conflict/ambiguous/silence 等），直接使用对话模型的评估
+* 修改初始化流程：开启实时感知时，初始化需等待对话模型输出 `<rs>` 标签后再调用后台模型初始化数值
+* 修改后台分析：后台模型接收对话模型的 `<rs>` 感知结果作为参考，据此校准五维数值
+* 修改初始化提示词：不再强调"初次见面、一切从零开始"，改为"人设定义了关系起点"
+* 修改注入触发：`enable_live_perception` 开启时，即使无 state 也注入实时感知提示
+* `<rs>` 激活时忽略 `<update>` 标签（避免冗余更新）
+* 群聊场景同步支持 `<rs>` 标签机制
+* 修复 `rs_content` 双重 JSON 编码：`set_meta_value` 已内置序列化，调用方无需再 `json.dumps`
+* 修复群聊 `rs_driven` 模式未使用 `<rs>` 的 atmosphere 数据，新增专用注入模板
+* 修复 `state.pop("_rs_atmosphere")` 修改调用方 dict 的副作用，改为 `state.get`
+* 修复群聊注入路径未设置 `_rs_atmosphere`，导致群聊氛围感知丢失
+* 修复 `_last_persona` 跨会话共享导致多用户同时聊天时人设串扰，改为按 session 存储
+* 修复清理循环未清理 `rs_content_*` / `user_state_*` / `tone_hint_*` / `msg_count_*` 元数据，导致 DB 膨胀
+* 新增 `enable_dialogue_static_update` 前置条件校验：未开启 `enable_live_perception` 时输出警告
+
 ### v1.5.2
 
 **🔧 稳定性修复（第二轮审查）**

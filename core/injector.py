@@ -5,11 +5,13 @@ from ..statics.prompts import (
     INJECTION_CONFLICT,
     INJECTION_MINIMAL,
     INJECTION_NORMAL,
+    INJECTION_RS_DIRECT,
     INJECTION_SILENCE,
     GROUP_INJECTION_AMBIGUOUS,
     GROUP_INJECTION_CONFLICT,
     GROUP_INJECTION_MINIMAL,
     GROUP_INJECTION_NORMAL,
+    GROUP_INJECTION_RS_DIRECT,
     GROUP_INJECTION_SILENCE,
 )
 
@@ -25,7 +27,7 @@ class RelationInjector:
             return self.plugin.config.get(key, default)
         return default
 
-    def build_injection(self, state: dict, scenario: str = "normal") -> Optional[str]:
+    def build_injection(self, state: dict, scenario: str = "normal", rs_driven: bool = False) -> Optional[str]:
         """根据关系状态和当前场景构建注入文本。
 
         Args:
@@ -36,6 +38,7 @@ class RelationInjector:
                 - "ambiguous": 好感在 60-75 暧昧区间
                 - "silence": 用户话很少/敷衍
                 - "normal": 默认
+            rs_driven: 是否由对话模型的 <rs> 标签驱动（跳过场景模板）
 
         Returns:
             注入文本，不需要注入时返回 None
@@ -47,6 +50,17 @@ class RelationInjector:
         trust = state.get("trust", 0)
         summary = state.get("summary", "")
         user_state = state.get("user_state", "")
+
+        rs_atmosphere = state.get("_rs_atmosphere", "")
+
+        if rs_driven and rs_atmosphere:
+            tone_hint = state.get("tone_hint", "保持自然语气回应")
+            user_state_text = user_state or summary or ""
+            return INJECTION_RS_DIRECT.format(
+                user_state=user_state_text,
+                atmosphere=rs_atmosphere,
+                tone_hint=tone_hint,
+            )
 
         if scenario == "minimal" or (affection >= 90 and trust >= 88):
             user_state_text = summary or user_state
@@ -69,7 +83,7 @@ class RelationInjector:
                 user_state=user_state or summary or ""
             )
 
-        atmosphere = self._derive_atmosphere(state)
+        atmosphere = rs_atmosphere or self._derive_atmosphere(state)
         tone_hint = state.get("tone_hint", "保持自然语气回应")
         user_state_text = user_state or summary or ""
         return INJECTION_NORMAL.format(
@@ -101,6 +115,7 @@ class RelationInjector:
         sender_name: str,
         active_users_summary: str = "",
         scenario: str = "normal",
+        rs_driven: bool = False,
     ) -> Optional[str]:
         if not self._cfg("enable_injection", True):
             return None
@@ -115,7 +130,11 @@ class RelationInjector:
             "sender_user_state": user_state or "",
             "sender_tone_hint": tone_hint or "保持自然语气回应",
             "active_users_summary": active_users_summary or "无",
+            "atmosphere": state.get("_rs_atmosphere", ""),
         }
+
+        if rs_driven and fmt_kwargs["atmosphere"]:
+            return GROUP_INJECTION_RS_DIRECT.format(**fmt_kwargs)
 
         if scenario == "minimal" or (affection >= 90 and trust >= 88):
             return GROUP_INJECTION_MINIMAL.format(**fmt_kwargs)

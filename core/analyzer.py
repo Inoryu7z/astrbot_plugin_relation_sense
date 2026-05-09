@@ -64,6 +64,7 @@ class RelationAnalyzer:
         user_name: str = "用户",
         persona_prompt: str = "",
         is_initial: bool = False,
+        rs_content: Optional[dict] = None,
     ) -> Optional[dict]:
         """执行关系分析。
 
@@ -74,6 +75,8 @@ class RelationAnalyzer:
             bot_name: Bot 名称
             user_name: 用户名
             persona_prompt: Bot 人设提示词
+            is_initial: 是否首次分析
+            rs_content: 对话模型输出的 <rs> 感知内容
 
         Returns:
             解析后的分析结果 dict，失败时返回 None
@@ -88,12 +91,23 @@ class RelationAnalyzer:
 
         system_prompt = ANALYZER_SYSTEM_PROMPT
 
+        rs_hint = ""
+        if rs_content:
+            rs_hint = (
+                f"\n\n## 对话模型的关系感知（你应当参考此感知来校准数值）\n"
+                f"对话模型（即扮演该人设的模型）自己评估的关系状态：\n"
+                f"- 关系氛围：{rs_content.get('atmosphere', '未知')}\n"
+                f"- 回应语气：{rs_content.get('tone', '未知')}\n"
+                f"- 对方状态：{rs_content.get('user_state', '未知')}\n"
+                f"请据此调整五维数值——如果对话模型认为关系亲密，你的数值应当反映出这一点。"
+            )
+
         if is_initial:
             user_prompt = ANALYZER_USER_PROMPT_INITIAL.format(
                 user_name=user_name,
                 persona_prompt=persona_prompt if persona_prompt else "（无人设提示）",
                 dialogue_text=dialogue_text,
-            )
+            ) + rs_hint
         else:
             user_prompt = ANALYZER_USER_PROMPT.format(
                 bot_name=bot_name,
@@ -105,7 +119,7 @@ class RelationAnalyzer:
                 depth=current_values.get("depth", 20),
                 dependence=current_values.get("dependence", 10),
                 return_rate=current_values.get("return_rate", 0),
-            )
+            ) + rs_hint
 
         providers = [p for p in [primary, secondary] if p]
         for provider_id in providers:
@@ -220,6 +234,7 @@ class RelationAnalyzer:
         target_name: str = "用户",
         target_id: str = "",
         persona_prompt: str = "",
+        rs_content: Optional[dict] = None,
     ) -> Optional[dict]:
         primary = str(self._cfg("analysis_provider_id", "") or "").strip()
         secondary = str(self._cfg("analysis_secondary_provider_id", "") or "").strip()
@@ -231,6 +246,17 @@ class RelationAnalyzer:
 
         system_prompt = GROUP_ANALYZER_SYSTEM_PROMPT
 
+        rs_hint = ""
+        if rs_content:
+            rs_hint = (
+                f"\n\n## 对话模型的关系感知（你应当参考此感知来校准数值）\n"
+                f"对话模型自己评估的关系状态：\n"
+                f"- 关系氛围：{rs_content.get('atmosphere', '未知')}\n"
+                f"- 回应语气：{rs_content.get('tone', '未知')}\n"
+                f"- 对方状态：{rs_content.get('user_state', '未知')}\n"
+                f"请据此调整五维数值——如果对话模型认为关系亲密，你的数值应当反映出这一点。"
+            )
+
         user_prompt = GROUP_ANALYZER_USER_PROMPT.format(
             target_name=target_name,
             target_id=target_id,
@@ -241,7 +267,7 @@ class RelationAnalyzer:
             depth=current_values.get("depth", 20),
             dependence=current_values.get("dependence", 10),
             return_rate=current_values.get("return_rate", 0),
-        )
+        ) + rs_hint
 
         providers = [p for p in [primary, secondary] if p]
         for provider_id in providers:

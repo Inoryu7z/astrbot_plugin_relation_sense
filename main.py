@@ -3,6 +3,7 @@ import json
 import re
 import time
 from pathlib import Path
+from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -41,7 +42,7 @@ def _remove_rs_injection(system_prompt):
     "astrbot_plugin_relation_sense",
     "Inoryu7z",
     "关系感知插件，感知与用户的关系亲密度、对方画像与对话氛围",
-    "1.5.2",
+    "1.6.0",
 )
 class RelationSensePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -65,7 +66,7 @@ class RelationSensePlugin(Star):
         self._bg_tasks: set[asyncio.Task] = set()
         self._analysis_locks: dict[str, asyncio.Lock] = {}
         self._lock_last_used: dict[str, float] = {}
-        self._last_persona: str = ""
+        self._last_persona: dict[str, str] = {}
         self._last_affection_change: dict[str, float] = {}
         self._last_activity: dict[str, float] = {}
         self._scenario_flags: dict[str, str] = {}
@@ -78,6 +79,8 @@ class RelationSensePlugin(Star):
 
     async def initialize(self):
         logger.info("[RelationSense] 插件启动，数据库就绪")
+        if self._cfg("enable_dialogue_static_update", False) and not self._cfg("enable_live_perception", False):
+            logger.warning("[RelationSense] enable_dialogue_static_update 需要先开启 enable_live_perception，当前未生效")
         self._spawn_bg(self._cleanup_loop())
         self._spawn_bg(self._cooling_loop())
         if self._cfg("enable_group_mode", False):
@@ -136,7 +139,7 @@ class RelationSensePlugin(Star):
             session_id, is_group = self._resolve_session_key(event)
             message_str = getattr(event, "message_str", "") or ""
             if getattr(req, "system_prompt", ""):
-                self._last_persona = req.system_prompt
+                self._last_persona[session_id] = req.system_prompt
             self._last_activity[session_id] = time.time()
 
             if message_str and message_str.strip():
@@ -323,6 +326,17 @@ class RelationSensePlugin(Star):
 
                 state = await self.db.get_relation_state_safe(session_id)
                 is_initial = state is None
+
+                use_live = self._cfg("enable_live_perception", False)
+                rs_content = await self._get_rs_content(session_id) if use_live else None
+
+                if is_initial and use_live and not rs_content:
+                    logger.info(
+                        "[RelationSense] 初始化等待对话模型 <rs> 标签 session=%s，跳过本次分析",
+                        session_id,
+                    )
+                    return {"ok": False, "error": "等待对话模型首次关系感知"}
+
                 if is_initial:
                     state = {
                         "affection": 50.0, "trust": 30.0, "depth": 20.0,
@@ -349,8 +363,9 @@ class RelationSensePlugin(Star):
                     current_values=current_values,
                     bot_name="Bot",
                     user_name="对方",
-                    persona_prompt=self._last_persona,
+                    persona_prompt=self._last_persona.get(session_id, ""),
                     is_initial=is_initial,
+                    rs_content=rs_content,
                 )
 
                 if not result:
@@ -407,6 +422,17 @@ class RelationSensePlugin(Star):
 
                 state = await self.db.get_relation_state_safe(session_key)
                 is_initial = state is None
+
+                use_live = self._cfg("enable_live_perception", False)
+                rs_content = await self._get_rs_content(session_key) if use_live else None
+
+                if is_initial and use_live and not rs_content:
+                    logger.info(
+                        "[RelationSense] 群聊初始化等待对话模型 <rs> 标签 session=%s，跳过本次分析",
+                        session_key,
+                    )
+                    return {"ok": False, "error": "等待对话模型首次关系感知"}
+
                 if is_initial:
                     state = {
                         "affection": 50.0, "trust": 30.0, "depth": 20.0,
@@ -436,7 +462,8 @@ class RelationSensePlugin(Star):
                     current_values=current_values,
                     target_name=target_name,
                     target_id=target_id,
-                    persona_prompt=self._last_persona,
+                    persona_prompt=self._last_persona.get(session_key, ""),
+                    rs_content=rs_content,
                 )
 
                 if not result:
@@ -511,7 +538,7 @@ class RelationSensePlugin(Star):
                         batch_result = await self.analyzer.analyze_group_batch(
                             dialogue_text=dialogue_text,
                             target_users=stale_users,
-                            persona_prompt=self._last_persona,
+                            persona_prompt=self._last_persona.get(group_key, ""),
                         )
 
                         if not batch_result:
@@ -681,14 +708,24 @@ class RelationSensePlugin(Star):
                 return
 
             state = await self.db.get_relation_state_safe(session_id)
-            if state is None:
-                return
-
             use_live = self._cfg("enable_live_perception", False)
 
-            if use_live:
-                state["user_state"] = ""
-                state["tone_hint"] = "保持自然语气回应"
+            if state is None:
+                if use_live:
+                    await self._inject_live_perception_only(req, session_id)
+                return
+
+            rs_content = await self._get_rs_content(session_id)
+            use_dialogue_static = self._cfg("enable_dialogue_static_update", False)
+
+            if use_live and (use_dialogue_static or rs_content):
+                if rs_content:
+                    state["user_state"] = rs_content.get("user_state", "") or state.get("summary", "")
+                    state["tone_hint"] = rs_content.get("tone", "") or "保持自然语气回应"
+                    state["_rs_atmosphere"] = rs_content.get("atmosphere", "")
+                else:
+                    state["user_state"] = ""
+                    state["tone_hint"] = "保持自然语气回应"
             else:
                 try:
                     user_state_meta = await self.db.get_meta_value(f"user_state_{session_id}", "")
@@ -702,7 +739,8 @@ class RelationSensePlugin(Star):
             if not state.get("user_state"):
                 state["user_state"] = "对方正在和你聊天。"
 
-            injection = self.injector.build_injection(state, scenario=self._determine_scenario(session_id, state))
+            rs_driven = use_live and rs_content is not None and (use_dialogue_static or rs_content.get("atmosphere"))
+            injection = self.injector.build_injection(state, scenario=self._determine_scenario(session_id, state), rs_driven=rs_driven)
             if not injection:
                 return
 
@@ -716,24 +754,7 @@ class RelationSensePlugin(Star):
             req.system_prompt += "\n" + RS_INJECTION_HEADER + "\n" + injection + "\n" + RS_INJECTION_FOOTER
 
             if use_live:
-                if self._cfg("enable_live_perception_update", False):
-                    perception_text = LIVE_PERCEPTION_UPDATE_PROMPT
-                else:
-                    perception_text = LIVE_PERCEPTION_PROMPT
-
-                live_state = self._live_user_state.get(session_id, "")
-                if live_state:
-                    perception_text += f"\n\n你最近一次感知到对方的状态是：{live_state}\n如果这与当前对话不符，请更新你的感知。"
-
-                contexts = getattr(req, "contexts", None)
-                if isinstance(contexts, list):
-                    contexts.append({
-                        "role": "user",
-                        "content": perception_text,
-                        "_no_save": True,
-                    })
-                else:
-                    logger.debug("[RelationSense] req.contexts 不可用，跳过实时感知注入（需 AstrBot v4.24.2+）")
+                await self._inject_live_perception_into_contexts(req, session_id)
 
             debug_mode = self._cfg("debug_mode", False)
             if debug_mode:
@@ -745,8 +766,52 @@ class RelationSensePlugin(Star):
         except Exception as e:
             logger.debug("[RelationSense] 注入失败: %s", e)
 
+    async def _inject_live_perception_only(self, req: ProviderRequest, session_id: str):
+        use_live = self._cfg("enable_live_perception", False)
+        if not use_live:
+            return
+        await self._inject_live_perception_into_contexts(req, session_id)
+        logger.debug("[RelationSense] 无 state，仅注入实时感知提示 session=%s", session_id)
+
+    async def _inject_live_perception_into_contexts(self, req: ProviderRequest, session_id: str):
+        if self._cfg("enable_live_perception_update", False):
+            perception_text = LIVE_PERCEPTION_UPDATE_PROMPT
+        else:
+            perception_text = LIVE_PERCEPTION_PROMPT
+
+        live_state = self._live_user_state.get(session_id, "")
+        if live_state:
+            perception_text += f"\n\n你最近一次感知到对方的状态是：{live_state}\n如果这与当前对话不符，请更新你的感知。"
+
+        rs_content = await self._get_rs_content(session_id)
+        if rs_content:
+            perception_text += f"\n\n你上一次的关系感知：氛围={rs_content.get('atmosphere', '')} 语气={rs_content.get('tone', '')} 对方状态={rs_content.get('user_state', '')}\n如果关系状态有变化，请在本次 <rs> 标签中更新。"
+
+        contexts = getattr(req, "contexts", None)
+        if isinstance(contexts, list):
+            contexts.append({
+                "role": "user",
+                "content": perception_text,
+                "_no_save": True,
+            })
+        else:
+            logger.debug("[RelationSense] req.contexts 不可用，跳过实时感知注入（需 AstrBot v4.24.2+）")
+
+    async def _get_rs_content(self, session_id: str) -> Optional[dict]:
+        try:
+            rs_raw = await self.db.get_meta_value(f"rs_content_{session_id}", "")
+            if rs_raw:
+                data = json.loads(rs_raw)
+                if isinstance(data, dict) and (data.get("atmosphere") or data.get("tone") or data.get("user_state")):
+                    return data
+        except (json.JSONDecodeError, ValueError, Exception):
+            pass
+        return None
+
     async def _inject_group_context(self, event: AstrMessageEvent, req: ProviderRequest, session_key: str):
         platform, group_id, user_id = self._parse_group_user_key(session_key)
+        use_live = self._cfg("enable_live_perception", False)
+
         if platform and group_id and user_id:
             last_ts = self._group_user_last_analyzed.get(session_key, 0)
             if time.time() - last_ts > 1800:
@@ -756,16 +821,30 @@ class RelationSensePlugin(Star):
 
         state = await self.db.get_relation_state_safe(session_key)
         if state is None:
+            if use_live:
+                await self._inject_live_perception_only(req, session_key)
             return
 
-        try:
-            user_state_meta = await self.db.get_meta_value(f"user_state_{session_key}", "")
-            tone_hint_meta = await self.db.get_meta_value(f"tone_hint_{session_key}", "")
-            state["user_state"] = user_state_meta or state.get("summary", "")
-            state["tone_hint"] = tone_hint_meta or "保持自然语气回应"
-        except Exception:
-            state["user_state"] = state.get("summary", "")
-            state["tone_hint"] = "保持自然语气回应"
+        rs_content = await self._get_rs_content(session_key)
+        use_dialogue_static = self._cfg("enable_dialogue_static_update", False)
+
+        if use_live and (use_dialogue_static or rs_content):
+            if rs_content:
+                state["user_state"] = rs_content.get("user_state", "") or state.get("summary", "")
+                state["tone_hint"] = rs_content.get("tone", "") or "保持自然语气回应"
+                state["_rs_atmosphere"] = rs_content.get("atmosphere", "")
+            else:
+                state["user_state"] = ""
+                state["tone_hint"] = "保持自然语气回应"
+        else:
+            try:
+                user_state_meta = await self.db.get_meta_value(f"user_state_{session_key}", "")
+                tone_hint_meta = await self.db.get_meta_value(f"tone_hint_{session_key}", "")
+                state["user_state"] = user_state_meta or state.get("summary", "")
+                state["tone_hint"] = tone_hint_meta or "保持自然语气回应"
+            except Exception:
+                state["user_state"] = state.get("summary", "")
+                state["tone_hint"] = "保持自然语气回应"
 
         if not state.get("user_state"):
             state["user_state"] = ""
@@ -779,12 +858,14 @@ class RelationSensePlugin(Star):
             active_users_summary = await self._build_active_users_summary(group_key, sender_id)
 
         scenario = self._determine_scenario(session_key, state)
+        rs_driven_group = use_live and rs_content is not None and (use_dialogue_static or rs_content.get("atmosphere"))
 
         injection = self.injector.build_group_injection(
             state,
             sender_name=sender_name,
             active_users_summary=active_users_summary,
             scenario=scenario,
+            rs_driven=rs_driven_group,
         )
 
         if not injection:
@@ -799,6 +880,9 @@ class RelationSensePlugin(Star):
 
         req.system_prompt += "\n" + RS_INJECTION_HEADER + "\n" + injection + "\n" + RS_INJECTION_FOOTER
 
+        if use_live:
+            await self._inject_live_perception_into_contexts(req, session_key)
+
         debug_mode = self._cfg("debug_mode", False)
         if debug_mode:
             logger.info(
@@ -808,9 +892,8 @@ class RelationSensePlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response_parse_update(self, event: AstrMessageEvent, resp):
-        if not self._cfg("enable_live_perception", False):
-            return
-        if not self._cfg("enable_live_perception_update", False):
+        use_live = self._cfg("enable_live_perception", False)
+        if not use_live:
             return
 
         try:
@@ -823,30 +906,69 @@ class RelationSensePlugin(Star):
             if not completion:
                 return
 
-            match = re.search(r"<update>(.*?)</update>", completion, re.DOTALL)
-            if not match:
-                return
+            rs_match = re.search(r"<rs>(.*?)</rs>", completion, re.DOTALL)
+            if rs_match:
+                rs_raw = rs_match.group(1).strip()
+                rs_data = self._parse_rs_tag(rs_raw)
+                if rs_data:
+                    await self.db.set_meta_value(f"rs_content_{session_id}", rs_data)
+                    self._live_user_state[session_id] = rs_data.get("user_state", "")
+                    logger.info(
+                        "[RelationSense] 对话模型输出 <rs> 标签 session=%s atmosphere=%s tone=%s user_state=%s",
+                        session_id, rs_data.get("atmosphere", ""), rs_data.get("tone", ""), rs_data.get("user_state", ""),
+                    )
 
-            new_state = match.group(1).strip()
-            if not new_state:
-                return
+                cleaned = re.sub(r"<rs>.*?</rs>", "", completion, flags=re.DOTALL).strip()
+                try:
+                    resp.completion_text = cleaned
+                except (AttributeError, TypeError):
+                    logger.debug("[RelationSense] 无法修改 resp.completion_text，<rs> 标签可能泄露到回复中")
 
-            self._live_user_state[session_id] = new_state
+            if self._cfg("enable_live_perception_update", False) and not rs_match:
+                update_match = re.search(r"<update>(.*?)</update>", completion, re.DOTALL)
+                if update_match:
+                    new_state = update_match.group(1).strip()
+                    if new_state:
+                        self._live_user_state[session_id] = new_state
+                        logger.info("[RelationSense] LLM 自主修正 user_state: session=%s state=%s", session_id, new_state)
 
-            cleaned = re.sub(
-                r"<update>.*?</update>",
-                "",
-                completion,
-                flags=re.DOTALL,
-            ).strip()
-            try:
-                resp.completion_text = cleaned
-            except (AttributeError, TypeError):
-                logger.debug("[RelationSense] 无法修改 resp.completion_text，<update> 标签可能泄露到回复中")
-
-            logger.info("[RelationSense] LLM 自主修正 user_state: session=%s state=%s", session_id, new_state)
+                    cleaned = re.sub(r"<update>.*?</update>", "", completion, flags=re.DOTALL).strip()
+                    try:
+                        resp.completion_text = cleaned
+                    except (AttributeError, TypeError):
+                        logger.debug("[RelationSense] 无法修改 resp.completion_text，<update> 标签可能泄露到回复中")
         except Exception as e:
-            logger.debug("[RelationSense] update 标签解析失败: %s", e)
+            logger.debug("[RelationSense] 标签解析失败: %s", e)
+
+    def _parse_rs_tag(self, raw: str) -> Optional[dict]:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {
+                    "atmosphere": str(data.get("atmosphere", "")).strip(),
+                    "tone": str(data.get("tone", "")).strip(),
+                    "user_state": str(data.get("user_state", "")).strip(),
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        atmosphere = ""
+        tone = ""
+        user_state = ""
+
+        atm_match = re.search(r'"atmosphere"\s*:\s*"([^"]*)"', raw)
+        if atm_match:
+            atmosphere = atm_match.group(1).strip()
+        tone_match = re.search(r'"tone"\s*:\s*"([^"]*)"', raw)
+        if tone_match:
+            tone = tone_match.group(1).strip()
+        us_match = re.search(r'"user_state"\s*:\s*"([^"]*)"', raw)
+        if us_match:
+            user_state = us_match.group(1).strip()
+
+        if atmosphere or tone or user_state:
+            return {"atmosphere": atmosphere, "tone": tone, "user_state": user_state}
+        return None
 
     # ========== 管理命令 ==========
 
@@ -1002,6 +1124,7 @@ class RelationSensePlugin(Star):
                 for sid in stale_sessions:
                     self._analysis_locks.pop(sid, None)
                     self._lock_last_used.pop(sid, None)
+                    self._last_persona.pop(sid, None)
                     self._last_affection_change.pop(sid, None)
                     self._last_activity.pop(sid, None)
                     self._scenario_flags.pop(sid, None)
@@ -1010,6 +1133,12 @@ class RelationSensePlugin(Star):
                     self._last_cooled.pop(sid, None)
                     self.buffer.clear(sid)
                 if stale_sessions:
+                    for sid in stale_sessions:
+                        for prefix in ("rs_content_", "user_state_", "tone_hint_", "msg_count_"):
+                            try:
+                                await self.db.delete_meta_value(f"{prefix}{sid}")
+                            except Exception:
+                                pass
                     logger.info(
                         "[RelationSense] 清理了 %d 个过期会话的内存缓存",
                         len(stale_sessions),
